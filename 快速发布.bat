@@ -5,8 +5,8 @@ cd /d "%~dp0"
 
 echo 正在初始化Git仓库...
 git init
-git remote add origin https://github.com/cuoti_shijuan/cuoti_shijuan.git 2>nul
-git remote set-url origin https://github.com/cuoti_shijuan/cuoti_shijuan.git 2>nul
+git remote add origin https://github.com/wumingzhao1998/cuoti_shijuan.git 2>nul
+git remote set-url origin https://github.com/wumingzhao1998/cuoti_shijuan.git 2>nul
 
 echo 正在添加文件...
 git add .

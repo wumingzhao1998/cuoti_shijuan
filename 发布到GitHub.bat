@@ -28,9 +28,9 @@ git remote get-url origin >nul 2>&1
 if errorlevel 1 (
     echo [2/6] 配置远程仓库...
     echo 请输入GitHub仓库地址（例如：https://github.com/用户名/cuoti_shijuan.git）
-    echo 或直接按回车使用默认地址：https://github.com/cuoti_shijuan/cuoti_shijuan.git
+    echo 或直接按回车使用默认地址：https://github.com/wumingzhao1998/cuoti_shijuan.git
     set /p repo_url="仓库地址: "
-    if "!repo_url!"=="" set repo_url=https://github.com/cuoti_shijuan/cuoti_shijuan.git
+    if "!repo_url!"=="" set repo_url=https://github.com/wumingzhao1998/cuoti_shijuan.git
     git remote add origin !repo_url!
     if errorlevel 1 (
         echo 错误：添加远程仓库失败
@@ -175,6 +175,6 @@ echo ✓ 发布成功！
 echo ========================================
 echo.
 echo 版本 v1.0 已推送到GitHub
-echo 仓库地址：https://github.com/cuoti_shijuan/cuoti_shijuan
+echo 仓库地址：https://github.com/wumingzhao1998/cuoti_shijuan
 echo.
 pause
