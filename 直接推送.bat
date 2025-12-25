@@ -16,7 +16,11 @@ echo 正在添加文件...
 git add .
 
 echo 正在提交...
-git commit -m "发布 v1.0 版本" --allow-empty
+git commit -m "优化 Streamlit Cloud 部署兼容性
+
+- 改进配置文件写入错误处理，适配只读文件系统
+- 添加 Streamlit Cloud 部署指南和检查清单
+- 优化异常处理，提供更友好的错误提示" --allow-empty
 
 echo 正在创建标签...
 git tag -d v1.0 >nul 2>&1

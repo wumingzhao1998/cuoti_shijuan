@@ -200,6 +200,7 @@ def load_config() -> Dict[str, Optional[str]]:
 def save_config(app_id: str, app_secret: str) -> None:
     """
     保存凭据到本地配置文件。
+    注意：在 Streamlit Cloud 等只读文件系统上，此操作会静默失败。
     """
     config_file = get_config_file_path()
     try:
@@ -209,8 +210,12 @@ def save_config(app_id: str, app_secret: str) -> None:
         # 设置文件权限（仅所有者可读写）
         if os.name != "nt":  # 非Windows系统
             os.chmod(config_file, 0o600)
+    except (IOError, OSError, PermissionError):
+        # 在 Streamlit Cloud 等只读文件系统上，保存失败是正常的
+        # 配置应通过环境变量或 st.secrets 提供
+        pass
     except Exception:
-        pass  # 保存失败时静默处理
+        pass  # 其他错误也静默处理
 
 
 def build_doc(subjects: List[str], selections: Dict[str, List[Dict]], token: str) -> bytes:
@@ -832,7 +837,7 @@ def main() -> None:
             st.session_state["llm_api_key"] = llm_api_key_input
             st.session_state["llm_api_base"] = llm_api_base_input if llm_api_base_input else None
             st.session_state["llm_model"] = llm_model_input if llm_model_input else None
-            # 保存到配置文件
+            # 保存到配置文件（在 Streamlit Cloud 上可能失败，这是正常的）
             try:
                 config_file = get_config_file_path()
                 if config_file.exists():
@@ -847,6 +852,9 @@ def main() -> None:
                     config_data["LLM_MODEL"] = llm_model_input
                 with open(config_file, "w", encoding="utf-8") as f:
                     json.dump(config_data, f, indent=2)
+            except (IOError, OSError, PermissionError):
+                # 在 Streamlit Cloud 等只读文件系统上，保存失败是正常的
+                pass
             except Exception:
                 pass
             llm_api_key = llm_api_key_input
@@ -876,7 +884,7 @@ def main() -> None:
             )
             if new_api_key:
                 st.session_state["llm_api_key"] = new_api_key
-                # 保存到配置文件
+                # 保存到配置文件（在 Streamlit Cloud 上可能失败，这是正常的）
                 try:
                     config_file = get_config_file_path()
                     if config_file.exists():
@@ -892,8 +900,13 @@ def main() -> None:
                         json.dump(config_data, f, indent=2)
                     st.success("✓ 新的API Key已保存，请刷新页面或重新运行程序以生效")
                     st.session_state["reconfigure_api_key"] = False  # 取消勾选
+                except (IOError, OSError, PermissionError):
+                    # 在 Streamlit Cloud 上，配置文件是只读的，使用 session state 即可
+                    st.info("💡 在 Streamlit Cloud 上，配置已保存到会话状态。建议通过 Secrets 配置环境变量以持久化。")
+                    st.session_state["reconfigure_api_key"] = False
                 except Exception:
-                    st.error("保存API Key失败，请检查文件权限")
+                    st.warning("⚠️ 保存到配置文件失败，但已保存到会话状态。建议通过环境变量或 Secrets 配置。")
+                    st.session_state["reconfigure_api_key"] = False
         
         # 保存原始配置的API Base，用于后续比较（但不再使用，只是为了兼容性保留变量）
         original_llm_api_base = llm_api_base
