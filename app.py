@@ -170,39 +170,21 @@ def safe_get_secret(key: str):
     在 Streamlit Cloud 上，secrets 通过 st.secrets 字典直接访问。
     """
     try:
-        if not hasattr(st, 'secrets'):
+        # 直接使用最简单的方式：st.secrets.get(key)
+        # 这是 Streamlit 推荐的标准方式，在所有环境下都可用
+        value = st.secrets.get(key)
+        # 如果返回空字符串，也视为未配置
+        if value == "" or value is None:
             return None
-        
-        # 尝试多种方式访问 secrets
-        # 方式1：直接字典访问 st.secrets[key]（Streamlit Cloud 推荐方式）
-        try:
-            if hasattr(st.secrets, '__getitem__'):
-                return st.secrets[key]
-        except (KeyError, AttributeError, TypeError):
-            pass
-        
-        # 方式2：使用 get 方法 st.secrets.get(key)
-        try:
-            if hasattr(st.secrets, 'get'):
-                value = st.secrets.get(key)
-                if value is not None:
-                    return value
-        except (AttributeError, TypeError):
-            pass
-        
-        # 方式3：通过属性访问 st.secrets.KEY（某些版本支持）
-        try:
-            if hasattr(st.secrets, key):
-                value = getattr(st.secrets, key)
-                if value is not None:
-                    return value
-        except (AttributeError, TypeError):
-            pass
-        
+        return value
+    except (StreamlitSecretNotFoundError, AttributeError):
+        # 如果 st.secrets 不存在或未配置，返回 None
         return None
-    except (StreamlitSecretNotFoundError, KeyError, AttributeError, TypeError):
+    except KeyError:
+        # 如果 key 不存在，返回 None（get 方法不会抛出 KeyError，但为了安全还是捕获）
         return None
     except Exception:
+        # 其他异常，返回 None
         return None
 
 
@@ -780,35 +762,49 @@ def main() -> None:
         # 其他异常，保守处理
         is_streamlit_cloud = False
     
-    app_id = (
-        os.getenv("FEISHU_APP_ID")
-        or safe_get_secret("FEISHU_APP_ID")
-        or config.get("FEISHU_APP_ID")
-        or st.session_state.get("feishu_app_id")
-    )
-    app_secret = (
-        os.getenv("FEISHU_APP_SECRET")
-        or safe_get_secret("FEISHU_APP_SECRET")
-        or config.get("FEISHU_APP_SECRET")
-        or st.session_state.get("feishu_app_secret")
-    )
+    # 读取配置，按优先级：环境变量 > secrets > 配置文件 > session state
+    # 先尝试从各个来源读取
+    env_app_id = os.getenv("FEISHU_APP_ID")
+    env_app_secret = os.getenv("FEISHU_APP_SECRET")
+    secret_app_id = safe_get_secret("FEISHU_APP_ID")
+    secret_app_secret = safe_get_secret("FEISHU_APP_SECRET")
+    config_app_id = config.get("FEISHU_APP_ID")
+    config_app_secret = config.get("FEISHU_APP_SECRET")
+    session_app_id = st.session_state.get("feishu_app_id")
+    session_app_secret = st.session_state.get("feishu_app_secret")
+    
+    app_id = env_app_id or secret_app_id or config_app_id or session_app_id
+    app_secret = env_app_secret or secret_app_secret or config_app_secret or session_app_secret
 
     if not app_id or not app_secret:
         # 如果检测到在 Streamlit Cloud 上，显示配置提示而不是输入框
         if is_streamlit_cloud:
-            st.error(
-                "❌ 配置缺失：请在 Streamlit Cloud 的 Settings → Secrets 中配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET。\n\n"
-                "**配置步骤：**\n"
-                "1. 点击右上角 '⋮' → Settings → Secrets\n"
-                "2. 粘贴以下配置（替换为你的实际值）：\n\n"
-                "```toml\n"
-                "[secrets]\n"
-                'FEISHU_APP_ID = "cli_a9c84f993638dceb"\n'
-                'FEISHU_APP_SECRET = "你的App_Secret"\n'
-                "```\n\n"
-                "3. 点击 Save，等待应用自动重新部署\n\n"
-                "⚠️ 注意：App Secret 需要从[飞书开放平台](https://open.feishu.cn/)获取最新值。"
-            )
+            # 提供更详细的诊断信息
+            missing_items = []
+            if not app_id:
+                missing_items.append("FEISHU_APP_ID")
+            if not app_secret:
+                missing_items.append("FEISHU_APP_SECRET")
+            
+            error_msg = f"❌ 配置缺失：以下配置项未找到：{', '.join(missing_items)}\n\n"
+            error_msg += "**请按以下步骤配置：**\n\n"
+            error_msg += "1. 点击右上角 '⋮' → Settings → Secrets\n\n"
+            error_msg += "2. 确保 Secrets 中包含以下配置（注意键名要完全匹配）：\n\n"
+            error_msg += "```toml\n"
+            error_msg += "[secrets]\n"
+            error_msg += 'FEISHU_APP_ID = "cli_a9c84f993638dceb"\n'
+            error_msg += 'FEISHU_APP_SECRET = "你的App_Secret"\n'
+            error_msg += "```\n\n"
+            error_msg += "3. **重要：** 点击 **Save changes** 按钮保存\n\n"
+            error_msg += "4. 等待应用自动重新部署（通常需要 2-5 分钟）\n\n"
+            error_msg += "5. 部署完成后，刷新此页面\n\n"
+            error_msg += "⚠️ **如果已经配置并保存，但仍然显示此错误：**\n"
+            error_msg += "- 确认 Secrets 格式正确（第一行是 `[secrets]`，使用英文双引号）\n"
+            error_msg += "- 在 Secrets 末尾添加一个空行，再次点击 Save 以触发重新部署\n"
+            error_msg += "- 等待至少 5 分钟后刷新页面\n\n"
+            error_msg += "💡 App Secret 需要从[飞书开放平台](https://open.feishu.cn/)获取最新值。"
+            
+            st.error(error_msg)
             st.stop()
         else:
             # 本地环境，允许手动输入
