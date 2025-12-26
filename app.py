@@ -762,17 +762,22 @@ def main() -> None:
     config = load_config()
     
     # 检测是否在 Streamlit Cloud 上运行
-    # 方法：检查 st.secrets 是否可以安全访问
+    # 方法：检查 st.secrets 是否可以访问
     # 在 Streamlit Cloud 上，st.secrets 对象总是存在（即使未配置 secrets）
-    # 在本地，如果没有 .streamlit/secrets.toml，访问 st.secrets 会抛出异常
+    # 在本地，如果没有 .streamlit/secrets.toml，访问 st.secrets 会抛出 StreamlitSecretNotFoundError
+    # 如果 st.secrets 可以访问，说明可能在 Streamlit Cloud 上或本地有 secrets.toml
+    # 此时如果读取不到配置，应该通过 Secrets 配置而不是显示输入框
     try:
-        _ = st.secrets  # 尝试访问 st.secrets
-        is_streamlit_cloud = True  # 如果能访问，说明在 Streamlit Cloud 上或本地有 secrets.toml
-    except (StreamlitSecretNotFoundError, AttributeError, RuntimeError):
-        # 如果抛出异常，说明在本地且没有 secrets.toml
+        # 尝试访问 st.secrets
+        _ = st.secrets
+        # 如果能访问（没有抛出 StreamlitSecretNotFoundError），认为可能在 Streamlit Cloud 上
+        # 或者在本地有 secrets.toml，这两种情况都应该使用 Secrets 配置而不是输入框
+        is_streamlit_cloud = True
+    except StreamlitSecretNotFoundError:
+        # 抛出 StreamlitSecretNotFoundError，确定在本地且没有 secrets.toml
         is_streamlit_cloud = False
-    except Exception:
-        # 其他异常，保守处理，认为不在 Streamlit Cloud 上
+    except (AttributeError, RuntimeError, Exception):
+        # 其他异常，保守处理
         is_streamlit_cloud = False
     
     app_id = (
