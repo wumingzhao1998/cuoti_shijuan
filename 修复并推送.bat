@@ -89,3 +89,4 @@ echo 仓库地址：https://github.com/wumingzhao1998/cuoti_shijuan
 echo 标签地址：https://github.com/wumingzhao1998/cuoti_shijuan/releases/tag/v1.0
 echo.
 pause
+

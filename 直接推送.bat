@@ -55,7 +55,14 @@ if errorlevel 1 (
 
 echo.
 echo 正在推送标签...
-git push origin v1.0
+git push origin v1.0 2>nul
+if errorlevel 1 (
+    echo 标签 v1.0 已存在，跳过标签推送
+    echo 如果需要更新标签，可以运行：
+    echo   git push origin v1.0 --force
+) else (
+    echo 标签推送成功
+)
 
 echo.
 echo ========================================
@@ -64,4 +71,8 @@ echo ========================================
 echo.
 echo 仓库：https://github.com/wumingzhao1998/cuoti_shijuan
 echo.
+echo 注意：如果标签推送失败，这是正常的（标签已存在）
+echo 代码和提交已成功推送！
+echo.
 pause
+

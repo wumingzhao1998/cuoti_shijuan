@@ -167,10 +167,40 @@ def parse_records(raw_records: List[Dict]) -> List[Dict]:
 def safe_get_secret(key: str):
     """
     安全读取 st.secrets，避免未配置 secrets.toml 时抛出异常。
+    在 Streamlit Cloud 上，secrets 通过 st.secrets 字典直接访问。
     """
     try:
-        return st.secrets.get(key)
-    except StreamlitSecretNotFoundError:
+        if not hasattr(st, 'secrets'):
+            return None
+        
+        # 尝试多种方式访问 secrets
+        # 方式1：直接字典访问 st.secrets[key]（Streamlit Cloud 推荐方式）
+        try:
+            if hasattr(st.secrets, '__getitem__'):
+                return st.secrets[key]
+        except (KeyError, AttributeError, TypeError):
+            pass
+        
+        # 方式2：使用 get 方法 st.secrets.get(key)
+        try:
+            if hasattr(st.secrets, 'get'):
+                value = st.secrets.get(key)
+                if value is not None:
+                    return value
+        except (AttributeError, TypeError):
+            pass
+        
+        # 方式3：通过属性访问 st.secrets.KEY（某些版本支持）
+        try:
+            if hasattr(st.secrets, key):
+                value = getattr(st.secrets, key)
+                if value is not None:
+                    return value
+        except (AttributeError, TypeError):
+            pass
+        
+        return None
+    except (StreamlitSecretNotFoundError, KeyError, AttributeError, TypeError):
         return None
     except Exception:
         return None
@@ -728,7 +758,17 @@ def main() -> None:
     st.caption(f"当前表：app_token={APP_TOKEN} · table_id={TABLE_ID}（可用环境变量覆盖）")
 
     # 读取密钥：优先环境变量/Secrets/配置文件/session state
+    # 在 Streamlit Cloud 上，优先使用 secrets，不显示手动输入界面
     config = load_config()
+    
+    # 检测是否在 Streamlit Cloud 上运行
+    # 方法：检查是否有 Streamlit Cloud 相关的环境变量，或者 secrets 对象存在
+    is_streamlit_cloud = (
+        os.getenv("STREAMLIT_SHARING_MODE") is not None 
+        or os.getenv("STREAMLIT_CLOUD") is not None
+        or (hasattr(st, 'secrets') and st.secrets is not None)
+    )
+    
     app_id = (
         os.getenv("FEISHU_APP_ID")
         or safe_get_secret("FEISHU_APP_ID")
@@ -743,23 +783,46 @@ def main() -> None:
     )
 
     if not app_id or not app_secret:
-        st.info(
-            "请在下方输入 FEISHU_APP_ID 和 FEISHU_APP_SECRET，输入后会自动保存到本地配置文件，下次启动无需重新输入。"
-            "注意：app_id/app_secret 与表格的 app_token/table_id 不同。"
-        )
-        app_id_input = st.text_input("FEISHU_APP_ID（飞书应用 App ID）", value=app_id or "")
-        app_secret_input = st.text_input(
-            "FEISHU_APP_SECRET（飞书应用 App Secret）", value=app_secret or "", type="password"
-        )
-        if not app_id_input or not app_secret_input:
+        # 在 Streamlit Cloud 上，如果配置缺失，显示错误提示而不是输入框
+        # 判断逻辑：检查是否可能在线环境（通过检查是否有 st.secrets 但读取不到配置）
+        has_secrets_object = hasattr(st, 'secrets') and st.secrets is not None
+        
+        # 如果能访问 st.secrets 但读取不到配置，说明可能在 Streamlit Cloud 上需要配置
+        # 或者检查环境变量来判断是否在 Streamlit Cloud
+        if (is_streamlit_cloud or has_secrets_object) and not os.getenv("FEISHU_APP_ID"):
+            st.error(
+                "❌ 配置缺失：请在 Streamlit Cloud 的 Settings → Secrets 中配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET。\n\n"
+                "**配置步骤：**\n"
+                "1. 点击右上角 '⋮' → Settings → Secrets\n"
+                "2. 粘贴以下配置（替换为你的实际值）：\n\n"
+                "```toml\n"
+                "[secrets]\n"
+                'FEISHU_APP_ID = "cli_a9c84f993638dceb"\n'
+                'FEISHU_APP_SECRET = "你的App_Secret"\n'
+                "```\n\n"
+                "3. 点击 Save，等待应用自动重新部署\n\n"
+                "⚠️ 注意：App Secret 需要从[飞书开放平台](https://open.feishu.cn/)获取最新值。"
+            )
             st.stop()
-        # 保存到配置文件和 session state
-        save_config(app_id_input, app_secret_input)
-        st.session_state["feishu_app_id"] = app_id_input
-        st.session_state["feishu_app_secret"] = app_secret_input
-        app_id = app_id_input
-        app_secret = app_secret_input
-        st.success("✓ 凭据已保存，下次启动无需重新输入")
+        else:
+            # 本地环境，允许手动输入
+            st.info(
+                "请在下方输入 FEISHU_APP_ID 和 FEISHU_APP_SECRET，输入后会自动保存到本地配置文件，下次启动无需重新输入。"
+                "注意：app_id/app_secret 与表格的 app_token/table_id 不同。"
+            )
+            app_id_input = st.text_input("FEISHU_APP_ID（飞书应用 App ID）", value=app_id or "")
+            app_secret_input = st.text_input(
+                "FEISHU_APP_SECRET（飞书应用 App Secret）", value=app_secret or "", type="password"
+            )
+            if not app_id_input or not app_secret_input:
+                st.stop()
+            # 保存到配置文件和 session state
+            save_config(app_id_input, app_secret_input)
+            st.session_state["feishu_app_id"] = app_id_input
+            st.session_state["feishu_app_secret"] = app_secret_input
+            app_id = app_id_input
+            app_secret = app_secret_input
+            st.success("✓ 凭据已保存，下次启动无需重新输入")
     else:
         # 如果已有凭据，显示已配置的提示
         source = "环境变量" if os.getenv("FEISHU_APP_ID") else ("secrets.toml" if safe_get_secret("FEISHU_APP_ID") else "本地配置文件")
