@@ -762,12 +762,18 @@ def main() -> None:
     config = load_config()
     
     # 检测是否在 Streamlit Cloud 上运行
-    # 方法：检查是否有 Streamlit Cloud 相关的环境变量，或者 secrets 对象存在
-    is_streamlit_cloud = (
-        os.getenv("STREAMLIT_SHARING_MODE") is not None 
-        or os.getenv("STREAMLIT_CLOUD") is not None
-        or (hasattr(st, 'secrets') and st.secrets is not None)
-    )
+    # 方法：检查 st.secrets 是否可以安全访问
+    # 在 Streamlit Cloud 上，st.secrets 对象总是存在（即使未配置 secrets）
+    # 在本地，如果没有 .streamlit/secrets.toml，访问 st.secrets 会抛出异常
+    try:
+        _ = st.secrets  # 尝试访问 st.secrets
+        is_streamlit_cloud = True  # 如果能访问，说明在 Streamlit Cloud 上或本地有 secrets.toml
+    except (StreamlitSecretNotFoundError, AttributeError, RuntimeError):
+        # 如果抛出异常，说明在本地且没有 secrets.toml
+        is_streamlit_cloud = False
+    except Exception:
+        # 其他异常，保守处理，认为不在 Streamlit Cloud 上
+        is_streamlit_cloud = False
     
     app_id = (
         os.getenv("FEISHU_APP_ID")
@@ -783,13 +789,8 @@ def main() -> None:
     )
 
     if not app_id or not app_secret:
-        # 在 Streamlit Cloud 上，如果配置缺失，显示错误提示而不是输入框
-        # 判断逻辑：检查是否可能在线环境（通过检查是否有 st.secrets 但读取不到配置）
-        has_secrets_object = hasattr(st, 'secrets') and st.secrets is not None
-        
-        # 如果能访问 st.secrets 但读取不到配置，说明可能在 Streamlit Cloud 上需要配置
-        # 或者检查环境变量来判断是否在 Streamlit Cloud
-        if (is_streamlit_cloud or has_secrets_object) and not os.getenv("FEISHU_APP_ID"):
+        # 如果检测到在 Streamlit Cloud 上，显示配置提示而不是输入框
+        if is_streamlit_cloud:
             st.error(
                 "❌ 配置缺失：请在 Streamlit Cloud 的 Settings → Secrets 中配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET。\n\n"
                 "**配置步骤：**\n"
