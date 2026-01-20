@@ -437,26 +437,28 @@ def render_question_streamlit(record: Dict, token: str) -> None:
 
 def safe_get_secret(key: str):
     """
-    安全读取 st.secrets，避免未配置 secrets.toml 时抛出异常。
-    在 Streamlit Cloud 上，secrets 通过 st.secrets 字典直接访问。
+    安全读取 st.secrets，支持两种格式：
+    1. 直接格式: KEY = "value"
+    2. 嵌套格式: [secrets] 下的 KEY = "value"
     """
     try:
-        # 直接使用最简单的方式：st.secrets.get(key)
-        # 这是 Streamlit 推荐的标准方式，在所有环境下都可用
+        # 方式1: 直接访问
         value = st.secrets.get(key)
-        # 如果返回空字符串，也视为未配置
-        if value == "" or value is None:
-            return None
-        return value
-    except (StreamlitSecretNotFoundError, AttributeError):
-        # 如果 st.secrets 不存在或未配置，返回 None
-        return None
-    except KeyError:
-        # 如果 key 不存在，返回 None（get 方法不会抛出 KeyError，但为了安全还是捕获）
-        return None
-    except Exception:
-        # 其他异常，返回 None
-        return None
+        if value is not None and value != "":
+            return value
+    except:
+        pass
+    
+    try:
+        # 方式2: 从 [secrets] 嵌套结构读取
+        if "secrets" in st.secrets:
+            value = st.secrets["secrets"].get(key)
+            if value is not None and value != "":
+                return value
+    except:
+        pass
+    
+    return None
 
 
 def get_config_file_path() -> Path:
