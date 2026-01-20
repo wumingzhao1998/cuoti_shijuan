@@ -4,8 +4,9 @@ import io
 import json
 import os
 import random
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import requests
 import streamlit as st
@@ -150,8 +151,11 @@ def parse_records(raw_records: List[Dict]) -> List[Dict]:
             except ValueError:
                 created_time = 0
 
+        record_id = item.get("record_id") or ""
+
         parsed.append(
             {
+                "record_id": record_id,
                 "subject": subject,
                 "knowledge_points": knowledge_points,
                 "handwriting_text": handwriting_text,
@@ -162,6 +166,263 @@ def parse_records(raw_records: List[Dict]) -> List[Dict]:
             }
         )
     return parsed
+
+
+# ----- 错题练习：练习记录表与选题 -----
+# 练习记录表字段名（与飞书多维表格中新建表一致）
+_P_FIELD_RID = "错题record_id"
+_P_FIELD_LAST = "上次练习时间"
+_P_FIELD_MASTERY = "掌握程度"
+_P_FIELD_COUNT = "练习次数"
+_P_FIELD_NEXT = "下次练习时间"
+
+
+def _interval_days_for_mastered(n: int) -> int:
+    """「会」时按练习次数给出的间隔天数。"""
+    return {1: 1, 2: 3, 3: 7, 4: 14}.get(n, 30)
+
+
+def fetch_practice_records(token: str, practice_table_id: str) -> Dict[str, Dict[str, Any]]:
+    """
+    拉取练习记录表全部记录，返回 错题record_id -> {practice_record_id, 上次练习时间, 掌握程度, 练习次数, 下次练习时间}。
+    同一错题若有多条，保留 上次练习时间 最大的一条。
+    """
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{practice_table_id}/records/search"
+    headers = {"Authorization": f"Bearer {token}"}
+    page_token = None
+    out: Dict[str, Dict[str, Any]] = {}
+
+    while True:
+        payload: Dict[str, object] = {"page_size": 100}
+        if page_token:
+            payload["page_token"] = page_token
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        if not resp.ok:
+            try:
+                detail = resp.json()
+            except Exception:
+                detail = resp.text
+            raise RuntimeError(f"拉取练习记录失败 HTTP {resp.status_code}: {detail}")
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"拉取练习记录失败: {data}")
+
+        for item in data.get("data", {}).get("items", []):
+            fields = item.get("fields", {})
+            rid = (fields.get(_P_FIELD_RID) or "").strip() or None
+            if not rid:
+                continue
+            try:
+                last_ms = int(fields.get(_P_FIELD_LAST) or 0)
+            except (TypeError, ValueError):
+                last_ms = 0
+            try:
+                cnt = int(fields.get(_P_FIELD_COUNT) or 0)
+            except (TypeError, ValueError):
+                cnt = 0
+            try:
+                next_ms = int(fields.get(_P_FIELD_NEXT) or 0)
+            except (TypeError, ValueError):
+                next_ms = 0
+            mastery = (fields.get(_P_FIELD_MASTERY) or "").strip() or "不会"
+
+            # 若已存在，只保留 上次练习时间 更大的一条
+            if rid in out and (out[rid].get(_P_FIELD_LAST) or 0) >= last_ms:
+                continue
+            out[rid] = {
+                "practice_record_id": item.get("record_id"),
+                _P_FIELD_LAST: last_ms,
+                _P_FIELD_MASTERY: mastery,
+                _P_FIELD_COUNT: cnt,
+                _P_FIELD_NEXT: next_ms,
+            }
+
+        page_token = data.get("data", {}).get("page_token")
+        if not data.get("data", {}).get("has_more"):
+            break
+
+    return out
+
+
+def create_practice_record(
+    token: str,
+    practice_table_id: str,
+    question_record_id: str,
+    mastery: str,
+    count: int,
+    next_ts_ms: int,
+) -> Optional[str]:
+    """在练习记录表中新建一条记录，返回新记录的 record_id。"""
+    now_ms = int(time.time() * 1000)
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{practice_table_id}/records"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = {
+        "fields": {
+            _P_FIELD_RID: question_record_id,
+            _P_FIELD_LAST: now_ms,
+            _P_FIELD_MASTERY: mastery,
+            _P_FIELD_COUNT: count,
+            _P_FIELD_NEXT: next_ts_ms,
+        }
+    }
+    resp = requests.post(url, headers=headers, json=body, timeout=10)
+    if not resp.ok:
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text
+        raise RuntimeError(f"创建练习记录失败 HTTP {resp.status_code}: {detail}")
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"创建练习记录失败: {data}")
+    rec = (data.get("data") or {}).get("record") or {}
+    return rec.get("record_id")
+
+
+def update_practice_record(
+    token: str,
+    practice_table_id: str,
+    practice_record_id: str,
+    mastery: str,
+    count: int,
+    next_ts_ms: int,
+) -> None:
+    """更新练习记录表中一条记录。"""
+    now_ms = int(time.time() * 1000)
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{practice_table_id}/records/{practice_record_id}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = {
+        "fields": {
+            _P_FIELD_LAST: now_ms,
+            _P_FIELD_MASTERY: mastery,
+            _P_FIELD_COUNT: count,
+            _P_FIELD_NEXT: next_ts_ms,
+        }
+    }
+    resp = requests.put(url, headers=headers, json=body, timeout=10)
+    if not resp.ok:
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text
+        raise RuntimeError(f"更新练习记录失败 HTTP {resp.status_code}: {detail}")
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"更新练习记录失败: {data}")
+
+
+def pick_next_question(
+    filtered: List[Dict],
+    practice_map: Dict[str, Dict[str, Any]],
+    now_ms: int,
+) -> Optional[Dict]:
+    """
+    从筛选后的错题中选一道：下次练习时间<=now 优先，否则取下次练习时间最早；无练习记录视为 0 最优先。
+    """
+    def next_ts(r: Dict) -> int:
+        rid = (r.get("record_id") or "").strip()
+        if not rid:
+            return 0
+        p = practice_map.get(rid)
+        return int(p.get(_P_FIELD_NEXT, 0) or 0) if p else 0
+
+    # 过滤：至少有 record_id、且 去手写 或 附件 非空
+    cand = [r for r in filtered if (r.get("record_id") or "").strip() and (r.get("handwriting_text") or r.get("attachments"))]
+    if not cand:
+        return None
+
+    # 排序：下次练习时间 <= now 的优先；否则按 下次练习时间 升序
+    cand.sort(key=lambda r: (0 if next_ts(r) <= now_ms else 1, next_ts(r)))
+    return cand[0]
+
+
+def save_practice_feedback(
+    token: str,
+    practice_table_id: str,
+    question_record_id: str,
+    mastered: bool,
+    practice_map: Dict[str, Dict[str, Any]],
+) -> None:
+    """
+    根据用户选择 会/不会 写入或更新练习记录，并就地更新 practice_map 以便本地选题正确。
+    mastered=True 表示「会」，False 表示「不会」。
+    """
+    now_ms = int(time.time() * 1000)
+    p = practice_map.get(question_record_id) if question_record_id else None
+    prev_count = int(p.get(_P_FIELD_COUNT, 0) or 0) if p else 0
+    count = prev_count + 1
+    mastery = "会" if mastered else "不会"
+
+    if mastered:
+        days = _interval_days_for_mastered(count)
+        next_ts_ms = now_ms + days * 24 * 60 * 60 * 1000
+    else:
+        next_ts_ms = now_ms + 5 * 60 * 1000  # +5 分钟
+
+    if p and p.get("practice_record_id"):
+        update_practice_record(token, practice_table_id, p["practice_record_id"], mastery, count, next_ts_ms)
+        p[_P_FIELD_LAST] = now_ms
+        p[_P_FIELD_MASTERY] = mastery
+        p[_P_FIELD_COUNT] = count
+        p[_P_FIELD_NEXT] = next_ts_ms
+    else:
+        new_id = create_practice_record(token, practice_table_id, question_record_id, mastery, count, next_ts_ms)
+        practice_map[question_record_id] = {
+            "practice_record_id": new_id,
+            _P_FIELD_LAST: now_ms,
+            _P_FIELD_MASTERY: mastery,
+            _P_FIELD_COUNT: count,
+            _P_FIELD_NEXT: next_ts_ms,
+        }
+
+
+def _load_image_bytes_for_display(url: str, token: str) -> Optional[bytes]:
+    """下载附件图片用于 Streamlit 展示，支持飞书临时 JSON。"""
+    if not url or not token:
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        if not r.ok:
+            return None
+        ct = (r.headers.get("Content-Type") or "").lower()
+        if "application/json" in ct:
+            try:
+                j = r.json()
+                if isinstance(j, dict) and j.get("code") == 0:
+                    d = j.get("data", {})
+                    u = None
+                    tmp = d.get("tmp_download_urls") or []
+                    if tmp and isinstance(tmp, list) and tmp:
+                        u = tmp[0].get("tmp_download_url") if isinstance(tmp[0], dict) else None
+                    if not u:
+                        u = d.get("tmp_download_url") or d.get("download_url")
+                    if u:
+                        r2 = requests.get(u, headers=headers, timeout=15, allow_redirects=True)
+                        if r2.ok:
+                            return r2.content
+            except Exception:
+                pass
+        return r.content if r.content else None
+    except Exception:
+        return None
+
+
+def render_question_streamlit(record: Dict, token: str) -> None:
+    """在 Streamlit 中渲染一道题的文本与图片。"""
+    t = (record.get("handwriting_text") or "").strip()
+    if t:
+        st.markdown(t)
+    for att in (record.get("attachments") or []):
+        if not is_image_file(att.get("name"), att.get("mime")):
+            continue
+        url = att.get("url")
+        raw = _load_image_bytes_for_display(url, token)
+        if raw:
+            try:
+                st.image(io.BytesIO(raw))
+            except Exception:
+                pass
 
 
 def safe_get_secret(key: str):
@@ -1035,6 +1296,44 @@ def main() -> None:
         token = get_tenant_access_token(app_id, app_secret)
         raw_records = fetch_records(token)
         records = parse_records(raw_records)
+    except requests.exceptions.ConnectionError as exc:
+        err_text = str(exc).lower()
+        if "getaddrinfo" in err_text or "resolve" in err_text or "11001" in err_text:
+            st.error(
+                "**网络连接失败：无法解析 open.feishu.cn**\n\n"
+                "本机无法解析飞书接口域名，多为 **DNS 或网络** 问题，请按顺序检查：\n\n"
+                "1. **网络**：确认能正常上网，浏览器可打开 https://open.feishu.cn\n"
+                "2. **DNS**：在 CMD 执行 `nslookup open.feishu.cn`，若失败可尝试：\n"
+                "   - 改用 DNS：8.8.8.8 或 114.114.114.114\n"
+                "   - 在「控制面板 → 网络和 Internet → 更改适配器选项」中编辑对应网卡，将 DNS 改为上述之一\n"
+                "3. **代理/VPN**：若使用代理或 VPN，尝试关闭或切换节点后重试\n"
+                "4. **公司网络**：若在公司内网，可能屏蔽了飞书，可换手机热点测试"
+            )
+        else:
+            st.error("**连接飞书 API 失败**，请检查网络与防火墙：\n\n" + str(exc))
+        return
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "99991663" in msg or "Invalid access token" in msg or "Invalid access token for authorization" in msg:
+            st.error(
+                "**飞书接口返回：访问令牌无效（99991663）**\n\n"
+                "应用已成功获取 tenant_access_token，但调用多维表格时被拒绝，通常是因为 **应用未被加入该多维表格的协作者**。\n\n"
+                "**若以前能正常用、近期没改过配置**：多半是飞书侧有变动——例如多维表格的 **协作者/分享被改**（应用被移出）、或飞书应用的 **权限/发布状态** 有更新。按下面步骤 **重新加一次协作者** 并检查开放平台，往往即可恢复。\n\n"
+                "**请按以下步骤操作：**\n\n"
+                "1. **把应用添加为多维表格协作者**\n"
+                "   - 在飞书中打开该 **多维表格**（错题本所在的整个「多维表格」文档）\n"
+                "   - 点击右上角 **「…」→「分享」** 或 **「协作」**\n"
+                "   - 在协作者中添加 **你的应用（机器人）**，权限至少为 **「可阅读」**\n"
+                "   - 若列表里找不到应用，先在 [飞书开放平台](https://open.feishu.cn) 找到该应用，在「权限管理」中开通 **多维表格 /  base:app** 等权限，并发布/启用\n\n"
+                "2. **确认应用与多维表格匹配**\n"
+                "   - 本程序用的 `app_token`（多维表格 ID）必须来自 **你已分享给该应用** 的多维表格\n"
+                "   - 使用的 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 必须是该应用在开放平台的凭证\n\n"
+                "3. **官方排查文档**\n"
+                "   - [如何修复 99991663 错误](https://open.feishu.cn/document/uAjLw4CM/ugTN1YjL4UTN24CO1UjN/trouble-shooting/how-to-fix-99991663-error)"
+            )
+            return
+        st.exception(exc)
+        return
     except Exception as exc:  # noqa: BLE001
         st.exception(exc)
         return
@@ -1049,7 +1348,7 @@ def main() -> None:
         st.warning("记录里没有找到学科字段，请检查表头。")
         return
 
-    selected_subjects = st.multiselect("选择学科（可多选）", options=subjects, default=subjects[:1])
+    selected_subjects = st.multiselect("选择学科（可多选）", options=subjects, default=subjects)
     if not selected_subjects:
         st.info("请选择至少一个学科。")
         st.stop()
@@ -1066,7 +1365,7 @@ def main() -> None:
     for kp in selected_kp:
         pool = [r for r in filtered if kp in (r.get("knowledge_points") or [])]
         max_count = len(pool)
-        default_count = min(1, max_count) if max_count > 0 else 0
+        default_count = max_count  # 默认最大
         count = st.number_input(
             f"{kp} 题目数量（最多 {max_count}）",
             min_value=0,
@@ -1102,7 +1401,7 @@ def main() -> None:
     
     def prepare_similar_selections(llm_api_key: str, llm_api_base: str = None, llm_model: str = None, token: str = None):
         """
-        准备类似题目数据：找到最近创建的题目，使用大模型生成类似题目。
+        准备类似题目数据：取前 X 道（X=用户选择的数量）最近创建的题目作为参考，每道参考题生成 1 道类似题。
         
         Args:
             llm_api_key: 大模型API密钥
@@ -1111,6 +1410,9 @@ def main() -> None:
             token: 飞书访问token，用于下载图片附件（可选）
         """
         similar_selections: Dict[str, List[Dict]] = {}
+        total_upper = sum(c for c in selected_plan.values() if c > 0)
+        progress_bar = st.progress(0.0) if total_upper > 0 else None
+        current = 0
         
         for kp, count in selected_plan.items():
             if count <= 0:
@@ -1121,7 +1423,7 @@ def main() -> None:
             if not pool:
                 continue
             
-            # 按创建时间排序，找到最近创建的题目
+            # 仅保留有「去手写」或附件的题目
             pool_with_time = [
                 (r, r.get("created_time", 0))
                 for r in pool
@@ -1131,36 +1433,38 @@ def main() -> None:
             if not pool_with_time:
                 continue
             
-            # 按创建时间降序排序（最近的在前面）
+            # 按创建时间降序排序（最近的在前面），取前 X 道（X=用户选择的数量）作为参考题
             pool_with_time.sort(key=lambda x: x[1], reverse=True)
-            reference_question = pool_with_time[0][0]  # 取最近的一道题
+            X = min(count, len(pool_with_time))
+            reference_questions = [pool_with_time[i][0] for i in range(X)]
             
-            # 使用大模型生成类似题目
-            try:
-                generated_texts = generate_similar_questions_with_llm(
-                    reference_question, count, llm_api_key, llm_api_base, llm_model, token
-                )
-                
-                # 将生成的文本转换为题目结构
-                generated_questions = []
-                for text in generated_texts:
-                    generated_questions.append({
-                        "subject": reference_question.get("subject"),
-                        "knowledge_points": [kp],
-                        "handwriting_text": text,
-                        "reason_type": "",
-                        "reason_detail": "",
-                        "attachments": [],
-                        "created_time": 0,  # 生成的题目没有创建时间
-                    })
-                
+            # 对每道参考题生成 1 道类似题
+            generated_questions = []
+            for ref in reference_questions:
+                try:
+                    texts = generate_similar_questions_with_llm(ref, 1, llm_api_key, llm_api_base, llm_model, token)
+                    if texts:
+                        generated_questions.append({
+                            "subject": ref.get("subject"),
+                            "knowledge_points": [kp],
+                            "handwriting_text": texts[0],
+                            "reason_type": "",
+                            "reason_detail": "",
+                            "attachments": [],
+                            "created_time": 0,
+                        })
+                except Exception as e:
+                    st.error(f"知识点 {kp} 生成类似题目失败：{str(e)}")
+                    # 该参考题失败后继续处理下一道，不中断整个知识点
+                current += 1
+                if progress_bar:
+                    progress_bar.progress(min(1.0, current / total_upper))
+            
+            if generated_questions:
                 similar_selections[kp] = generated_questions
-                
-            except Exception as e:
-                # 如果生成失败，不将空列表加入到结果中，只显示错误提示
-                st.error(f"知识点 {kp} 生成类似题目失败：{str(e)}")
-                # 不添加到similar_selections中，这样生成文档时会自动跳过该知识点
         
+        if progress_bar:
+            progress_bar.progress(1.0)
         return similar_selections
     
     # 使用两列布局放置按钮
@@ -1310,6 +1614,145 @@ def main() -> None:
                         """)
                     else:
                         st.exception(exc)
+
+    # ----- 错题练习 -----
+    st.markdown("---")
+    st.markdown("### 错题练习")
+    practice_table_id = (
+        os.getenv("FEISHU_PRACTICE_TABLE_ID")
+        or safe_get_secret("FEISHU_PRACTICE_TABLE_ID")
+        or config.get("FEISHU_PRACTICE_TABLE_ID")
+        or ""
+    )
+    filtered_practice = (
+        filtered
+        if not selected_kp
+        else [r for r in filtered if any(kp in (r.get("knowledge_points") or []) for kp in selected_kp)]
+    )
+
+    def _go_next_practice() -> None:
+        pm = st.session_state.get("practice_map", {})
+        pf = st.session_state.get("practice_filtered", [])
+        n = pick_next_question(pf, pm, int(time.time() * 1000))
+        if n:
+            st.session_state["practice_current"] = n
+            st.session_state["practice_origin"] = None
+            st.session_state["practice_is_similar"] = False
+            st.session_state["practice_similar_count"] = 0
+        else:
+            for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count"):
+                st.session_state.pop(k, None)
+            st.success("本轮可复习的题目已练完。")
+
+    if st.session_state.get("practice_current"):
+        cur = st.session_state["practice_current"]
+        st.session_state.setdefault("practice_map", {})
+        st.session_state.setdefault("practice_filtered", [])
+        if st.session_state.get("practice_is_similar"):
+            st.caption("类似题")
+        render_question_streamlit(cur, token)
+        st.caption("掌握了吗？")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("会", key="practice_btn_yes"):
+                is_sim = st.session_state.get("practice_is_similar", False)
+                if not is_sim:
+                    save_practice_feedback(
+                        token,
+                        st.session_state["practice_table_id"],
+                        (cur.get("record_id") or "").strip(),
+                        True,
+                        st.session_state["practice_map"],
+                    )
+                _go_next_practice()
+                st.rerun()
+        with col_b:
+            if st.button("不会", key="practice_btn_no"):
+                is_sim = st.session_state.get("practice_is_similar", False)
+                orig = st.session_state.get("practice_origin")
+                ptid = st.session_state.get("practice_table_id", "")
+                pm = st.session_state.get("practice_map", {})
+                if not is_sim:
+                    save_practice_feedback(
+                        token,
+                        ptid,
+                        (cur.get("record_id") or "").strip(),
+                        False,
+                        pm,
+                    )
+                    st.session_state["practice_origin"] = cur
+                    if llm_api_key:
+                        with st.spinner("正在生成类似题目…"):
+                            try:
+                                texts = generate_similar_questions_with_llm(
+                                    cur, 1, llm_api_key, llm_api_base, llm_model, token
+                                )
+                                if texts:
+                                    st.session_state["practice_current"] = {
+                                        "handwriting_text": texts[0],
+                                        "attachments": [],
+                                        "record_id": "",
+                                    }
+                                    st.session_state["practice_is_similar"] = True
+                                    st.session_state["practice_similar_count"] = 1
+                                    st.rerun()
+                                else:
+                                    _go_next_practice()
+                            except Exception as e:
+                                st.error(f"生成类似题目失败：{e}，跳过类似题进入下一道")
+                                _go_next_practice()
+                    else:
+                        st.warning("未配置智谱AI API Key，无法生成类似题，直接进入下一道")
+                        _go_next_practice()
+                else:
+                    cnt = st.session_state.get("practice_similar_count", 0)
+                    if cnt < 2 and llm_api_key and orig:
+                        with st.spinner("再出一道类似题目…"):
+                            try:
+                                texts = generate_similar_questions_with_llm(
+                                    orig, 1, llm_api_key, llm_api_base, llm_model, token
+                                )
+                                if texts:
+                                    st.session_state["practice_current"] = {
+                                        "handwriting_text": texts[0],
+                                        "attachments": [],
+                                        "record_id": "",
+                                    }
+                                    st.session_state["practice_similar_count"] = 2
+                                    st.rerun()
+                                else:
+                                    _go_next_practice()
+                            except Exception:
+                                _go_next_practice()
+                    else:
+                        _go_next_practice()
+                st.rerun()
+    else:
+        if not practice_table_id:
+            st.error(
+                "错题练习需要配置 **FEISHU_PRACTICE_TABLE_ID**（练习记录表的 table_id）。"
+                "请在环境变量、Secrets 或 `.feishu_config.json` 中配置。"
+                "需在同一多维表格下新建一张表，包含字段：错题record_id、上次练习时间、掌握程度、练习次数、下次练习时间。"
+            )
+        else:
+            if st.button("开始练习", key="practice_start"):
+                with st.spinner("正在加载练习记录…"):
+                    try:
+                        pm = fetch_practice_records(token, practice_table_id)
+                        n = pick_next_question(filtered_practice, pm, int(time.time() * 1000))
+                        if not n:
+                            st.info("暂无需要复习的题目，或在本筛选条件下可复习的题目已练完。")
+                        else:
+                            st.session_state["practice_current"] = n
+                            st.session_state["practice_map"] = pm
+                            st.session_state["practice_table_id"] = practice_table_id
+                            st.session_state["practice_filtered"] = filtered_practice
+                            st.session_state["practice_origin"] = None
+                            st.session_state["practice_is_similar"] = False
+                            st.session_state["practice_similar_count"] = 0
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"加载练习记录失败：{e}")
 
 
 if __name__ == "__main__":
