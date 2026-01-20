@@ -1134,25 +1134,6 @@ def _render_home_page():
             st.session_state["current_page"] = "exam"
             st.rerun()
     
-    # 底部显示配置状态
-    st.markdown("---")
-    with st.expander("⚙️ 配置状态", expanded=False):
-        app_id, app_secret, llm_api_key, _, _, config, _ = _load_app_config()
-        if app_id and app_secret:
-            st.success("✓ 飞书凭据已配置")
-        else:
-            st.warning("⚠️ 飞书凭据未配置")
-        
-        if llm_api_key:
-            st.success("✓ 智谱AI API Key 已配置")
-        else:
-            st.info("ℹ️ 智谱AI API Key 未配置（类似题目功能不可用）")
-        
-        practice_table_id = config.get("FEISHU_PRACTICE_TABLE_ID") or os.getenv("FEISHU_PRACTICE_TABLE_ID") or safe_get_secret("FEISHU_PRACTICE_TABLE_ID")
-        if practice_table_id:
-            st.success("✓ 练习记录表已配置")
-        else:
-            st.warning("⚠️ 练习记录表未配置（错题练习功能不可用）")
 
 
 def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, config):
