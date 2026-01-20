@@ -209,7 +209,12 @@ def fetch_practice_records(token: str, practice_table_id: str) -> Dict[str, Dict
 
         for item in data.get("data", {}).get("items", []):
             fields = item.get("fields", {})
-            rid = (fields.get(_P_FIELD_RID) or "").strip() or None
+            # 处理 rid 字段，可能是字符串或列表
+            rid_raw = fields.get(_P_FIELD_RID)
+            if isinstance(rid_raw, list):
+                rid = rid_raw[0].strip() if rid_raw and isinstance(rid_raw[0], str) else None
+            else:
+                rid = (rid_raw or "").strip() or None
             if not rid:
                 continue
             try:
@@ -224,7 +229,12 @@ def fetch_practice_records(token: str, practice_table_id: str) -> Dict[str, Dict
                 next_ms = int(fields.get(_P_FIELD_NEXT) or 0)
             except (TypeError, ValueError):
                 next_ms = 0
-            mastery = (fields.get(_P_FIELD_MASTERY) or "").strip() or "不会"
+            # 处理 mastery 字段，可能是字符串或列表
+            mastery_raw = fields.get(_P_FIELD_MASTERY)
+            if isinstance(mastery_raw, list):
+                mastery = mastery_raw[0].strip() if mastery_raw and isinstance(mastery_raw[0], str) else "不会"
+            else:
+                mastery = (mastery_raw or "").strip() or "不会"
 
             # 若已存在，只保留 上次练习时间 更大的一条
             if rid in out and (out[rid].get(_P_FIELD_LAST) or 0) >= last_ms:
@@ -510,81 +520,115 @@ def build_doc(subjects: List[str], selections: Dict[str, List[Dict]], token: str
             handwriting_text = q.get("handwriting_text", "").strip()
             
             if attachments:
-                # 有附件，直接插入图片（使用Word自动编号）
+                # 有附件，使用 List Number 编号；第一段内容放入 para，避免空编号
                 para = doc.add_paragraph(style="List Number")
-                
-                # 处理所有附件
+                first = True
+
                 for att in attachments:
                     url = att.get("url")
                     name = att.get("name") or "附件"
                     mime = att.get("mime")
                     if not url:
                         continue
-                    
-                    # 先判断是否为图片（优先使用mime，其次文件名扩展名）
+
                     is_image = is_image_file(name, mime)
-                    
+
                     if not is_image:
-                        # 如果不是图片，直接给出链接
-                        doc.add_paragraph(f"附件：{name}（非图片，下载链接：{url}）").italic = True
+                        text = f"附件：{name}（非图片，下载链接：{url}）"
+                        if first:
+                            r = para.add_run(text)
+                            r.italic = True
+                            first = False
+                        else:
+                            p = doc.add_paragraph(text)
+                            if p.runs:
+                                p.runs[0].italic = True
                         continue
-                    
+
                     try:
                         headers = {"Authorization": f"Bearer {token}"}
                         resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
                         if not resp.ok:
-                            doc.add_paragraph(f"[附件下载失败] {name} - HTTP {resp.status_code}")
+                            text = f"[附件下载失败] {name} - HTTP {resp.status_code}"
+                            if first:
+                                para.add_run(text)
+                                first = False
+                            else:
+                                doc.add_paragraph(text)
                             continue
-                        
-                        # 检查响应是否为JSON（飞书API可能返回JSON）
+
                         content_type = resp.headers.get("Content-Type", "").lower()
                         image_data = None
-                        
-                        # 如果Content-Type是JSON，尝试解析提取真实下载URL
+
                         if "application/json" in content_type:
                             try:
                                 json_data = resp.json()
-                                # 如果是JSON，尝试提取真实下载URL
                                 if isinstance(json_data, dict) and json_data.get("code") == 0:
                                     data = json_data.get("data", {})
-                                    # 尝试多种可能的URL字段
                                     tmp_urls = data.get("tmp_download_urls", [])
                                     if tmp_urls and isinstance(tmp_urls, list) and len(tmp_urls) > 0:
                                         real_url = tmp_urls[0].get("tmp_download_url") if isinstance(tmp_urls[0], dict) else None
                                     else:
                                         real_url = data.get("tmp_download_url") or data.get("download_url") or json_data.get("download_url")
-                                    
+
                                     if real_url:
-                                        # 使用真实URL重新下载
                                         resp2 = requests.get(real_url, headers=headers, timeout=15, allow_redirects=True)
                                         if resp2.ok:
                                             image_data = resp2.content
                                         else:
-                                            doc.add_paragraph(f"[附件下载失败] {name} - HTTP {resp2.status_code}")
+                                            text = f"[附件下载失败] {name} - HTTP {resp2.status_code}"
+                                            if first:
+                                                para.add_run(text)
+                                                first = False
+                                            else:
+                                                doc.add_paragraph(text)
                                             continue
                                     else:
-                                        # 无法提取真实URL
-                                        doc.add_paragraph(f"[无法获取附件下载地址] {name}")
+                                        text = f"[无法获取附件下载地址] {name}"
+                                        if first:
+                                            para.add_run(text)
+                                            first = False
+                                        else:
+                                            doc.add_paragraph(text)
                                         continue
-                            except (ValueError, KeyError, TypeError) as json_err:
-                                # JSON解析失败，降级使用响应内容
+                            except (ValueError, KeyError, TypeError):
                                 image_data = resp.content
                         else:
-                            # 不是JSON，直接使用响应内容作为图片数据
                             image_data = resp.content
-                        
+
                         if image_data:
-                            # 尝试插入图片
                             try:
                                 image_stream = io.BytesIO(image_data)
-                                doc.add_picture(image_stream, width=Inches(5.5))
+                                if first:
+                                    run = para.add_run()
+                                    run.add_picture(image_stream, width=Inches(5.5))
+                                    first = False
+                                else:
+                                    doc.add_picture(image_stream, width=Inches(5.5))
                             except Exception as img_exc:  # noqa: BLE001
-                                # 插入图片失败，可能是格式不支持
-                                doc.add_paragraph(f"附件：{name}（图片插入失败：{img_exc}）").italic = True
+                                text = f"附件：{name}（图片插入失败：{img_exc}）"
+                                if first:
+                                    r = para.add_run(text)
+                                    r.italic = True
+                                    first = False
+                                else:
+                                    p = doc.add_paragraph(text)
+                                    if p.runs:
+                                        p.runs[0].italic = True
                         else:
-                            doc.add_paragraph(f"[附件处理失败] {name}")
+                            text = f"[附件处理失败] {name}"
+                            if first:
+                                para.add_run(text)
+                                first = False
+                            else:
+                                doc.add_paragraph(text)
                     except Exception as exc:  # noqa: BLE001
-                        doc.add_paragraph(f"[附件处理异常] {name}: {exc}")
+                        text = f"[附件处理异常] {name}: {exc}"
+                        if first:
+                            para.add_run(text)
+                            first = False
+                        else:
+                            doc.add_paragraph(text)
             elif handwriting_text:
                 # 没有附件但有文本，显示文本
                 para = doc.add_paragraph(style="List Number")
@@ -987,44 +1031,20 @@ def generate_similar_questions_with_llm(reference_question: Dict, count: int, ap
         raise Exception(f"题目生成失败: {str(e)}")
 
 
-def main() -> None:
-    st.set_page_config(page_title="错题生成试卷", page_icon="📄", layout="wide")
-    st.title("飞书错题本生成试卷")
-    st.caption(f"v{VERSION} - 实现题库本身WORD文档")
-
-    st.markdown(
-        "从飞书多维表格自动读取学科与知识点，选择后生成可下载的 Word 文档或 HTML 文档。"
-    )
-    
-    # 提示信息
-    st.info("💡 提示：支持生成题库和类似题目，每种都支持 WORD 文档和 HTML 文档两种格式")
-    st.caption(f"当前表：app_token={APP_TOKEN} · table_id={TABLE_ID}（可用环境变量覆盖）")
-
-    # 读取密钥：优先环境变量/Secrets/配置文件/session state
-    # 在 Streamlit Cloud 上，优先使用 secrets，不显示手动输入界面
+def _load_app_config():
+    """加载应用配置，返回 (app_id, app_secret, llm_api_key, llm_api_base, llm_model, config, is_streamlit_cloud)"""
     config = load_config()
     
     # 检测是否在 Streamlit Cloud 上运行
-    # 方法：检查 st.secrets 是否可以访问
-    # 在 Streamlit Cloud 上，st.secrets 对象总是存在（即使未配置 secrets）
-    # 在本地，如果没有 .streamlit/secrets.toml，访问 st.secrets 会抛出 StreamlitSecretNotFoundError
-    # 如果 st.secrets 可以访问，说明可能在 Streamlit Cloud 上或本地有 secrets.toml
-    # 此时如果读取不到配置，应该通过 Secrets 配置而不是显示输入框
     try:
-        # 尝试访问 st.secrets
         _ = st.secrets
-        # 如果能访问（没有抛出 StreamlitSecretNotFoundError），认为可能在 Streamlit Cloud 上
-        # 或者在本地有 secrets.toml，这两种情况都应该使用 Secrets 配置而不是输入框
         is_streamlit_cloud = True
     except StreamlitSecretNotFoundError:
-        # 抛出 StreamlitSecretNotFoundError，确定在本地且没有 secrets.toml
         is_streamlit_cloud = False
     except (AttributeError, RuntimeError, Exception):
-        # 其他异常，保守处理
         is_streamlit_cloud = False
     
-    # 读取配置，按优先级：环境变量 > secrets > 配置文件 > session state
-    # 先尝试从各个来源读取
+    # 读取飞书配置
     env_app_id = os.getenv("FEISHU_APP_ID")
     env_app_secret = os.getenv("FEISHU_APP_SECRET")
     secret_app_id = safe_get_secret("FEISHU_APP_ID")
@@ -1036,357 +1056,296 @@ def main() -> None:
     
     app_id = env_app_id or secret_app_id or config_app_id or session_app_id
     app_secret = env_app_secret or secret_app_secret or config_app_secret or session_app_secret
-
-    if not app_id or not app_secret:
-        # 如果检测到在 Streamlit Cloud 上，显示配置提示而不是输入框
-        if is_streamlit_cloud:
-            # 提供更详细的诊断信息
-            missing_items = []
-            if not app_id:
-                missing_items.append("FEISHU_APP_ID")
-            if not app_secret:
-                missing_items.append("FEISHU_APP_SECRET")
-            
-            error_msg = f"❌ 配置缺失：以下配置项未找到：{', '.join(missing_items)}\n\n"
-            error_msg += "**请按以下步骤配置：**\n\n"
-            error_msg += "1. 点击右上角 '⋮' → Settings → Secrets\n\n"
-            error_msg += "2. 确保 Secrets 中包含以下配置（注意键名要完全匹配）：\n\n"
-            error_msg += "```toml\n"
-            error_msg += "[secrets]\n"
-            error_msg += 'FEISHU_APP_ID = "cli_a9c84f993638dceb"\n'
-            error_msg += 'FEISHU_APP_SECRET = "你的App_Secret"\n'
-            error_msg += "```\n\n"
-            error_msg += "3. **重要：** 点击 **Save changes** 按钮保存\n\n"
-            error_msg += "4. 等待应用自动重新部署（通常需要 2-5 分钟）\n\n"
-            error_msg += "5. 部署完成后，刷新此页面\n\n"
-            error_msg += "⚠️ **如果已经配置并保存，但仍然显示此错误：**\n"
-            error_msg += "- 确认 Secrets 格式正确（第一行是 `[secrets]`，使用英文双引号）\n"
-            error_msg += "- 在 Secrets 末尾添加一个空行，再次点击 Save 以触发重新部署\n"
-            error_msg += "- 等待至少 5 分钟后刷新页面\n\n"
-            error_msg += "💡 App Secret 需要从[飞书开放平台](https://open.feishu.cn/)获取最新值。"
-            
-            st.error(error_msg)
-            st.stop()
-        else:
-            # 本地环境，允许手动输入
-            st.info(
-                "请在下方输入 FEISHU_APP_ID 和 FEISHU_APP_SECRET，输入后会自动保存到本地配置文件，下次启动无需重新输入。"
-                "注意：app_id/app_secret 与表格的 app_token/table_id 不同。"
-            )
-            app_id_input = st.text_input("FEISHU_APP_ID（飞书应用 App ID）", value=app_id or "")
-            app_secret_input = st.text_input(
-                "FEISHU_APP_SECRET（飞书应用 App Secret）", value=app_secret or "", type="password"
-            )
-            if not app_id_input or not app_secret_input:
-                st.stop()
-            # 保存到配置文件和 session state
-            save_config(app_id_input, app_secret_input)
-            st.session_state["feishu_app_id"] = app_id_input
-            st.session_state["feishu_app_secret"] = app_secret_input
-            app_id = app_id_input
-            app_secret = app_secret_input
-            st.success("✓ 凭据已保存，下次启动无需重新输入")
-    else:
-        # 如果已有凭据，显示已配置的提示
-        source = "环境变量" if os.getenv("FEISHU_APP_ID") else ("secrets.toml" if safe_get_secret("FEISHU_APP_ID") else "本地配置文件")
-        st.success(f"✓ 已检测到 FEISHU_APP_ID 和 FEISHU_APP_SECRET（来自 {source}）")
-
-    # 大模型API配置（用于生成类似题目）
-    st.markdown("---")
-    st.markdown("### 大模型配置（用于生成类似题目）")
+    
+    # 读取LLM配置
     llm_api_key = (
         os.getenv("LLM_API_KEY")
         or safe_get_secret("LLM_API_KEY")
         or config.get("LLM_API_KEY")
         or st.session_state.get("llm_api_key")
     )
-    llm_api_base = (
-        os.getenv("LLM_API_BASE")
-        or safe_get_secret("LLM_API_BASE")
-        or config.get("LLM_API_BASE")
-        or st.session_state.get("llm_api_base")
-        or None
-    )
+    llm_api_base = "https://open.bigmodel.cn/api/paas/v4"  # 固定使用智谱AI
     llm_model = (
         os.getenv("LLM_MODEL")
         or safe_get_secret("LLM_MODEL")
         or config.get("LLM_MODEL")
         or st.session_state.get("llm_model")
-        or None
+        or "glm-4.6v"
     )
     
-    # 如果没有配置API Base和Model，但有API Key，默认使用智谱GLM-4.6V
-    if llm_api_key and not llm_api_base and not llm_model:
-        llm_api_base = "https://open.bigmodel.cn/api/paas/v4"
-        llm_model = "glm-4.6v"
-        # 保存默认配置到session state，但不覆盖配置文件（用户可能需要手动配置）
-        if "llm_api_base" not in st.session_state:
-            st.session_state["llm_api_base"] = llm_api_base
-        if "llm_model" not in st.session_state:
-            st.session_state["llm_model"] = llm_model
+    return app_id, app_secret, llm_api_key, llm_api_base, llm_model, config, is_streamlit_cloud
+
+
+def _check_feishu_credentials(app_id, app_secret, is_streamlit_cloud):
+    """检查飞书凭据，如果缺失则显示配置界面"""
+    if not app_id or not app_secret:
+        if is_streamlit_cloud:
+            missing_items = []
+            if not app_id:
+                missing_items.append("FEISHU_APP_ID")
+            if not app_secret:
+                missing_items.append("FEISHU_APP_SECRET")
+            st.error(f"❌ 配置缺失：{', '.join(missing_items)}，请在 Streamlit Cloud Secrets 中配置。")
+            st.stop()
+        else:
+            st.info("请输入飞书应用凭据")
+            app_id_input = st.text_input("FEISHU_APP_ID", value=app_id or "")
+            app_secret_input = st.text_input("FEISHU_APP_SECRET", value=app_secret or "", type="password")
+            if not app_id_input or not app_secret_input:
+                st.stop()
+            save_config(app_id_input, app_secret_input)
+            st.session_state["feishu_app_id"] = app_id_input
+            st.session_state["feishu_app_secret"] = app_secret_input
+            return app_id_input, app_secret_input
+    return app_id, app_secret
+
+
+def _render_home_page():
+    """渲染主页：两个大按钮"""
+    st.title("📚 错题本")
+    st.caption(f"v{VERSION}")
     
-    # 强制使用智谱AI的API Base URL（程序只支持智谱AI）
-    if llm_api_key:
-        llm_api_base = "https://open.bigmodel.cn/api/paas/v4"
-        if "llm_api_base" not in st.session_state or st.session_state.get("llm_api_base") != llm_api_base:
-            st.session_state["llm_api_base"] = llm_api_base
+    st.markdown("---")
     
-    if not llm_api_key:
-        st.info("生成类似题目功能需要配置智谱AI API密钥。")
+    # 使用容器创建更美观的按钮布局
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("""
+        <div style="text-align: center; padding: 20px;">
+            <h2>📝</h2>
+            <p>根据艾宾浩斯遗忘曲线复习错题</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("错题练习", type="primary", use_container_width=True, key="home_practice_btn"):
+            st.session_state["current_page"] = "practice"
+            st.rerun()
+    
+    with col2:
+        st.markdown("""
+        <div style="text-align: center; padding: 20px;">
+            <h2>📄</h2>
+            <p>选择学科和知识点生成试卷</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("生成试卷", type="primary", use_container_width=True, key="home_exam_btn"):
+            st.session_state["current_page"] = "exam"
+            st.rerun()
+    
+    # 底部显示配置状态
+    st.markdown("---")
+    with st.expander("⚙️ 配置状态", expanded=False):
+        app_id, app_secret, llm_api_key, _, _, config, _ = _load_app_config()
+        if app_id and app_secret:
+            st.success("✓ 飞书凭据已配置")
+        else:
+            st.warning("⚠️ 飞书凭据未配置")
         
-        # 直接使用智谱AI配置
-        default_base = "https://open.bigmodel.cn/api/paas/v4"
-        default_model = "glm-4.6v"
-        help_text = "智谱AI API Base URL（使用 glm-4.6v，支持图片输入）"
+        if llm_api_key:
+            st.success("✓ 智谱AI API Key 已配置")
+        else:
+            st.info("ℹ️ 智谱AI API Key 未配置（类似题目功能不可用）")
         
-        llm_api_key_input = st.text_input(
-            "智谱AI API Key",
-            value="",
-            type="password",
-            help="输入你的智谱AI API密钥"
+        practice_table_id = config.get("FEISHU_PRACTICE_TABLE_ID") or os.getenv("FEISHU_PRACTICE_TABLE_ID") or safe_get_secret("FEISHU_PRACTICE_TABLE_ID")
+        if practice_table_id:
+            st.success("✓ 练习记录表已配置")
+        else:
+            st.warning("⚠️ 练习记录表未配置（错题练习功能不可用）")
+
+
+def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, config):
+    """渲染错题练习页面"""
+    # 返回按钮
+    if st.button("← 返回主页", key="practice_back"):
+        # 清理练习状态
+        for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count", "practice_map", "practice_filtered", "practice_table_id"):
+            st.session_state.pop(k, None)
+        st.session_state["current_page"] = "home"
+        st.rerun()
+    
+    st.title("📝 错题练习")
+    st.caption("根据艾宾浩斯遗忘曲线智能安排复习")
+    
+    practice_table_id = (
+        os.getenv("FEISHU_PRACTICE_TABLE_ID")
+        or safe_get_secret("FEISHU_PRACTICE_TABLE_ID")
+        or config.get("FEISHU_PRACTICE_TABLE_ID")
+        or ""
+    )
+    
+    if not practice_table_id:
+        st.error(
+            "错题练习需要配置 **FEISHU_PRACTICE_TABLE_ID**（练习记录表的 table_id）。\n\n"
+            "请在 `.feishu_config.json` 中配置。\n\n"
+            "需在同一多维表格下新建一张表，包含字段：错题record_id、上次练习时间、掌握程度、练习次数、下次练习时间。"
         )
-        # API Base URL固定为智谱AI，不允许修改
-        st.text_input(
-            "API Base URL",
-            value=default_base,
-            help=help_text,
-            disabled=True
-        )
-        llm_api_base_input = default_base  # 强制使用智谱AI的API Base
-        llm_model_input = st.text_input(
-            "模型名称（可选，留空自动选择）",
-            value=default_model,
-            help="模型名称。推荐使用 glm-4.6v（支持图片输入）"
-        )
+        return
+    
+    # 学科筛选
+    subjects = sorted({r["subject"] for r in records if r.get("subject")})
+    selected_subjects = st.multiselect("选择学科", options=subjects, default=subjects, key="practice_subjects")
+    filtered = [r for r in records if r.get("subject") in selected_subjects]
+    
+    # 知识点筛选
+    knowledge_options = sorted({kp for r in filtered for kp in r.get("knowledge_points") or []})
+    selected_kp = st.multiselect("选择知识点", options=knowledge_options, default=knowledge_options, key="practice_kp")
+    
+    filtered_practice = [r for r in filtered if any(kp in (r.get("knowledge_points") or []) for kp in selected_kp)] if selected_kp else filtered
+    
+    st.markdown("---")
+    
+    def _go_next_practice() -> None:
+        pm = st.session_state.get("practice_map", {})
+        pf = st.session_state.get("practice_filtered", [])
+        n = pick_next_question(pf, pm, int(time.time() * 1000))
+        if n:
+            st.session_state["practice_current"] = n
+            st.session_state["practice_origin"] = None
+            st.session_state["practice_is_similar"] = False
+            st.session_state["practice_similar_count"] = 0
+        else:
+            for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count"):
+                st.session_state.pop(k, None)
+            st.success("🎉 本轮可复习的题目已练完！")
+    
+    if st.session_state.get("practice_current"):
+        cur = st.session_state["practice_current"]
+        st.session_state.setdefault("practice_map", {})
+        st.session_state.setdefault("practice_filtered", [])
         
-        if llm_api_key_input:
-            st.session_state["llm_api_key"] = llm_api_key_input
-            st.session_state["llm_api_base"] = llm_api_base_input if llm_api_base_input else None
-            st.session_state["llm_model"] = llm_model_input if llm_model_input else None
-            # 保存到配置文件（在 Streamlit Cloud 上可能失败，这是正常的）
-            try:
-                config_file = get_config_file_path()
-                if config_file.exists():
-                    with open(config_file, "r", encoding="utf-8") as f:
-                        config_data = json.load(f)
-                else:
-                    config_data = {}
-                config_data["LLM_API_KEY"] = llm_api_key_input
-                if llm_api_base_input:
-                    config_data["LLM_API_BASE"] = llm_api_base_input
-                if llm_model_input:
-                    config_data["LLM_MODEL"] = llm_model_input
-                with open(config_file, "w", encoding="utf-8") as f:
-                    json.dump(config_data, f, indent=2)
-            except (IOError, OSError, PermissionError):
-                # 在 Streamlit Cloud 等只读文件系统上，保存失败是正常的
-                pass
-            except Exception:
-                pass
-            llm_api_key = llm_api_key_input
-            llm_api_base = llm_api_base_input if llm_api_base_input else None
-            llm_model = llm_model_input if llm_model_input else None
-            st.success("✓ API配置已保存")
-    else:
-        st.success("✓ 已检测到 LLM_API_KEY")
+        # 显示题目
+        st.markdown("### 当前题目")
+        if st.session_state.get("practice_is_similar"):
+            st.caption("📌 类似题")
         
-        # 添加强制使用智谱AI的API Base URL（所有智谱AI模型都必须使用智谱AI API Base）
-        llm_api_base = "https://open.bigmodel.cn/api/paas/v4"
-        if "llm_api_base" not in st.session_state or st.session_state.get("llm_api_base") != llm_api_base:
-            st.session_state["llm_api_base"] = llm_api_base
+        render_question_streamlit(cur, token)
         
-        # 显示修正后的API Base
-        st.caption(f"API Base: {llm_api_base}")
+        st.markdown("---")
+        st.markdown("**掌握了吗？**")
         
-        # 提供重新配置API Key的选项
-        if st.checkbox("重新配置智谱AI API Key", key="reconfigure_api_key", help="如果API Key无效或已过期，可以勾选此选项重新输入"):
-            st.info("💡 请输入新的智谱AI API Key。如果API Key无效，可以在[智谱AI开放平台](https://open.bigmodel.cn/)查看和更新。")
-            new_api_key = st.text_input(
-                "新的智谱AI API Key",
-                value="",
-                type="password",
-                help="输入新的智谱AI API密钥",
-                key="new_llm_api_key_input"
-            )
-            if new_api_key:
-                st.session_state["llm_api_key"] = new_api_key
-                # 保存到配置文件（在 Streamlit Cloud 上可能失败，这是正常的）
-                try:
-                    config_file = get_config_file_path()
-                    if config_file.exists():
-                        with open(config_file, "r", encoding="utf-8") as f:
-                            config_data = json.load(f)
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("✓ 会了", type="primary", use_container_width=True, key="practice_btn_yes"):
+                is_sim = st.session_state.get("practice_is_similar", False)
+                if not is_sim:
+                    save_practice_feedback(
+                        token,
+                        st.session_state["practice_table_id"],
+                        (cur.get("record_id") or "").strip(),
+                        True,
+                        st.session_state["practice_map"],
+                    )
+                _go_next_practice()
+                st.rerun()
+        
+        with col_b:
+            if st.button("✗ 不会", use_container_width=True, key="practice_btn_no"):
+                is_sim = st.session_state.get("practice_is_similar", False)
+                orig = st.session_state.get("practice_origin")
+                ptid = st.session_state.get("practice_table_id", "")
+                pm = st.session_state.get("practice_map", {})
+                
+                if not is_sim:
+                    save_practice_feedback(token, ptid, (cur.get("record_id") or "").strip(), False, pm)
+                    st.session_state["practice_origin"] = cur
+                    if llm_api_key:
+                        with st.spinner("正在生成类似题目…"):
+                            try:
+                                texts = generate_similar_questions_with_llm(cur, 1, llm_api_key, llm_api_base, llm_model, token)
+                                if texts:
+                                    st.session_state["practice_current"] = {"handwriting_text": texts[0], "attachments": [], "record_id": ""}
+                                    st.session_state["practice_is_similar"] = True
+                                    st.session_state["practice_similar_count"] = 1
+                                    st.rerun()
+                                else:
+                                    _go_next_practice()
+                            except Exception as e:
+                                st.error(f"生成类似题目失败：{e}")
+                                _go_next_practice()
                     else:
-                        config_data = {}
-                    config_data["LLM_API_KEY"] = new_api_key
-                    config_data["LLM_API_BASE"] = llm_api_base
-                    if llm_model:
-                        config_data["LLM_MODEL"] = llm_model
-                    with open(config_file, "w", encoding="utf-8") as f:
-                        json.dump(config_data, f, indent=2)
-                    st.success("✓ 新的API Key已保存，请刷新页面或重新运行程序以生效")
-                    st.session_state["reconfigure_api_key"] = False  # 取消勾选
-                except (IOError, OSError, PermissionError):
-                    # 在 Streamlit Cloud 上，配置文件是只读的，使用 session state 即可
-                    st.info("💡 在 Streamlit Cloud 上，配置已保存到会话状态。建议通过 Secrets 配置环境变量以持久化。")
-                    st.session_state["reconfigure_api_key"] = False
-                except Exception:
-                    st.warning("⚠️ 保存到配置文件失败，但已保存到会话状态。建议通过环境变量或 Secrets 配置。")
-                    st.session_state["reconfigure_api_key"] = False
-        
-        # 保存原始配置的API Base，用于后续比较（但不再使用，只是为了兼容性保留变量）
-        original_llm_api_base = llm_api_base
-        
-        # 智谱AI模型选项
-        available_models = ["glm-4.6v", "glm-4", "glm-4-flash", "glm-3-turbo"]
-        default_model_option = llm_model or "glm-4.6v"
-        
-        # 优先使用环境变量或配置中的模型，如果它在可用列表中
-        # 如果环境变量中设置了模型，且该模型在可用列表中，使用环境变量中的
-        preferred_model = None
-        if llm_model and llm_model in available_models:
-            preferred_model = llm_model
-        else:
-            preferred_model = default_model_option
-        
-        # 如果session state中没有保存的选择，或环境变量/配置中有模型，优先使用环境变量/配置中的
-        if "selected_llm_model" not in st.session_state:
-            st.session_state["selected_llm_model"] = preferred_model
-        elif llm_model and llm_model in available_models:
-            # 如果环境变量/配置中有模型，且与session state中的不同，更新为环境变量/配置中的
-            st.session_state["selected_llm_model"] = llm_model
-        
-        # 确保session state中的模型在可用列表中，如果不在则重置为默认值
-        current_selected = st.session_state.get("selected_llm_model")
-        if current_selected not in available_models:
-            st.session_state["selected_llm_model"] = preferred_model
-            current_selected = preferred_model
-        
-        # 显示智谱AI模型选择器
-        col_model1, col_model2 = st.columns([2, 3])
-        with col_model1:
-            selected_model = st.selectbox(
-                "选择模型",
-                options=available_models,
-                index=available_models.index(current_selected) if current_selected in available_models else 0,
-                help="可以在运行时切换不同的智谱AI模型，推荐使用 glm-4.6v（支持图片输入）",
-                key="llm_model_selector"
-            )
-            # 更新session state
-            st.session_state["selected_llm_model"] = selected_model
-        
-        with col_model2:
-            if selected_model:
-                # 检查模型是否来自环境变量
-                model_source = ""
-                if os.getenv("LLM_MODEL") == selected_model:
-                    model_source = "（来自环境变量）"
-                elif config.get("LLM_MODEL") == selected_model:
-                    model_source = "（来自配置文件）"
-                st.markdown(f"**当前模型**: {selected_model} {model_source}")
-        
-        # 使用选择的模型（优先使用用户选择的，其次使用配置的）
-        llm_model = st.session_state.get("selected_llm_model") or llm_model
-        
-        # 确保API Base URL始终是智谱AI的（已经在上面修正过了，这里再次确认）
-        llm_api_base = "https://open.bigmodel.cn/api/paas/v4"
-        st.session_state["llm_api_base"] = llm_api_base
+                        _go_next_practice()
+                else:
+                    cnt = st.session_state.get("practice_similar_count", 0)
+                    if cnt < 2 and llm_api_key and orig:
+                        with st.spinner("再出一道类似题目…"):
+                            try:
+                                texts = generate_similar_questions_with_llm(orig, 1, llm_api_key, llm_api_base, llm_model, token)
+                                if texts:
+                                    st.session_state["practice_current"] = {"handwriting_text": texts[0], "attachments": [], "record_id": ""}
+                                    st.session_state["practice_similar_count"] = 2
+                                    st.rerun()
+                                else:
+                                    _go_next_practice()
+                            except Exception:
+                                _go_next_practice()
+                    else:
+                        _go_next_practice()
+                st.rerun()
+    else:
+        st.info("点击下方按钮开始练习")
+        if st.button("🚀 开始练习", type="primary", use_container_width=True, key="practice_start"):
+            with st.spinner("正在加载练习记录…"):
+                try:
+                    pm = fetch_practice_records(token, practice_table_id)
+                    n = pick_next_question(filtered_practice, pm, int(time.time() * 1000))
+                    if not n:
+                        st.info("暂无需要复习的题目。")
+                    else:
+                        st.session_state["practice_current"] = n
+                        st.session_state["practice_map"] = pm
+                        st.session_state["practice_table_id"] = practice_table_id
+                        st.session_state["practice_filtered"] = filtered_practice
+                        st.session_state["practice_origin"] = None
+                        st.session_state["practice_is_similar"] = False
+                        st.session_state["practice_similar_count"] = 0
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"加载练习记录失败：{e}")
 
-    try:
-        token = get_tenant_access_token(app_id, app_secret)
-        raw_records = fetch_records(token)
-        records = parse_records(raw_records)
-    except requests.exceptions.ConnectionError as exc:
-        err_text = str(exc).lower()
-        if "getaddrinfo" in err_text or "resolve" in err_text or "11001" in err_text:
-            st.error(
-                "**网络连接失败：无法解析 open.feishu.cn**\n\n"
-                "本机无法解析飞书接口域名，多为 **DNS 或网络** 问题，请按顺序检查：\n\n"
-                "1. **网络**：确认能正常上网，浏览器可打开 https://open.feishu.cn\n"
-                "2. **DNS**：在 CMD 执行 `nslookup open.feishu.cn`，若失败可尝试：\n"
-                "   - 改用 DNS：8.8.8.8 或 114.114.114.114\n"
-                "   - 在「控制面板 → 网络和 Internet → 更改适配器选项」中编辑对应网卡，将 DNS 改为上述之一\n"
-                "3. **代理/VPN**：若使用代理或 VPN，尝试关闭或切换节点后重试\n"
-                "4. **公司网络**：若在公司内网，可能屏蔽了飞书，可换手机热点测试"
-            )
-        else:
-            st.error("**连接飞书 API 失败**，请检查网络与防火墙：\n\n" + str(exc))
-        return
-    except RuntimeError as exc:
-        msg = str(exc)
-        if "99991663" in msg or "Invalid access token" in msg or "Invalid access token for authorization" in msg:
-            st.error(
-                "**飞书接口返回：访问令牌无效（99991663）**\n\n"
-                "应用已成功获取 tenant_access_token，但调用多维表格时被拒绝，通常是因为 **应用未被加入该多维表格的协作者**。\n\n"
-                "**若以前能正常用、近期没改过配置**：多半是飞书侧有变动——例如多维表格的 **协作者/分享被改**（应用被移出）、或飞书应用的 **权限/发布状态** 有更新。按下面步骤 **重新加一次协作者** 并检查开放平台，往往即可恢复。\n\n"
-                "**请按以下步骤操作：**\n\n"
-                "1. **把应用添加为多维表格协作者**\n"
-                "   - 在飞书中打开该 **多维表格**（错题本所在的整个「多维表格」文档）\n"
-                "   - 点击右上角 **「…」→「分享」** 或 **「协作」**\n"
-                "   - 在协作者中添加 **你的应用（机器人）**，权限至少为 **「可阅读」**\n"
-                "   - 若列表里找不到应用，先在 [飞书开放平台](https://open.feishu.cn) 找到该应用，在「权限管理」中开通 **多维表格 /  base:app** 等权限，并发布/启用\n\n"
-                "2. **确认应用与多维表格匹配**\n"
-                "   - 本程序用的 `app_token`（多维表格 ID）必须来自 **你已分享给该应用** 的多维表格\n"
-                "   - 使用的 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 必须是该应用在开放平台的凭证\n\n"
-                "3. **官方排查文档**\n"
-                "   - [如何修复 99991663 错误](https://open.feishu.cn/document/uAjLw4CM/ugTN1YjL4UTN24CO1UjN/trouble-shooting/how-to-fix-99991663-error)"
-            )
-            return
-        st.exception(exc)
-        return
-    except Exception as exc:  # noqa: BLE001
-        st.exception(exc)
-        return
 
-    if not records:
-        st.warning("表格暂无记录，请先在飞书多维表格填充数据。")
-        return
-
-    # 学科多选
+def _render_exam_page(token, records, llm_api_key, llm_api_base, llm_model):
+    """渲染生成试卷页面"""
+    # 返回按钮
+    if st.button("← 返回主页", key="exam_back"):
+        st.session_state["current_page"] = "home"
+        st.rerun()
+    
+    st.title("📄 生成试卷")
+    st.caption("选择学科和知识点，生成错题专项训练")
+    
+    # 学科选择
     subjects = sorted({r["subject"] for r in records if r.get("subject")})
     if not subjects:
-        st.warning("记录里没有找到学科字段，请检查表头。")
+        st.warning("没有找到学科数据")
         return
-
-    selected_subjects = st.multiselect("选择学科（可多选）", options=subjects, default=subjects)
+    
+    selected_subjects = st.multiselect("选择学科", options=subjects, default=subjects, key="exam_subjects")
     if not selected_subjects:
-        st.info("请选择至少一个学科。")
-        st.stop()
+        st.info("请选择至少一个学科")
+        return
+    
     filtered = [r for r in records if r.get("subject") in selected_subjects]
-
-    # 知识点多选
-    knowledge_options = sorted(
-        {kp for r in filtered for kp in r.get("knowledge_points") or []}
-    )
-    selected_kp = st.multiselect("选择知识点（可多选）", options=knowledge_options, default=knowledge_options)
-
-    # 选择每个知识点的题目数量
+    
+    # 知识点选择
+    knowledge_options = sorted({kp for r in filtered for kp in r.get("knowledge_points") or []})
+    selected_kp = st.multiselect("选择知识点", options=knowledge_options, default=knowledge_options, key="exam_kp")
+    
+    # 每个知识点的题目数量
+    st.markdown("### 题目数量")
     selected_plan: Dict[str, int] = {}
     for kp in selected_kp:
         pool = [r for r in filtered if kp in (r.get("knowledge_points") or [])]
         max_count = len(pool)
-        default_count = max_count  # 默认最大
-        count = st.number_input(
-            f"{kp} 题目数量（最多 {max_count}）",
-            min_value=0,
-            max_value=max_count,
-            step=1,
-            value=default_count,
-        )
+        count = st.number_input(f"{kp}（最多 {max_count} 题）", min_value=0, max_value=max_count, value=max_count, key=f"exam_count_{kp}")
         selected_plan[kp] = count
-
-    # 检查是否有至少一个知识点选择了题目（数量 > 0）
-    has_valid_selection = len(selected_plan) > 0 and any(count > 0 for count in selected_plan.values())
+    
+    has_valid_selection = any(count > 0 for count in selected_plan.values())
     
     if not has_valid_selection:
-        if not selected_plan:
-            st.info("⚠️ 请先选择知识点")
-        else:
-            st.info("⚠️ 请至少为一个知识点设置题目数量（大于0）才能生成题库")
+        st.info("请至少选择一道题目")
+        return
     
-    # 准备题目数据
     def prepare_selections():
-        """准备选中的题目数据"""
         selections: Dict[str, List[Dict]] = {}
         for kp, count in selected_plan.items():
             if count <= 0:
@@ -1394,21 +1353,11 @@ def main() -> None:
             pool = [r for r in filtered if kp in (r.get("knowledge_points") or [])]
             if count > len(pool):
                 count = len(pool)
-            # 随机抽题
             if count > 0:
                 selections[kp] = random.sample(pool, count)
         return selections
     
-    def prepare_similar_selections(llm_api_key: str, llm_api_base: str = None, llm_model: str = None, token: str = None):
-        """
-        准备类似题目数据：取前 X 道（X=用户选择的数量）最近创建的题目作为参考，每道参考题生成 1 道类似题。
-        
-        Args:
-            llm_api_key: 大模型API密钥
-            llm_api_base: 大模型API基础URL（可选）
-            llm_model: 模型名称（可选）
-            token: 飞书访问token，用于下载图片附件（可选）
-        """
+    def prepare_similar_selections():
         similar_selections: Dict[str, List[Dict]] = {}
         total_upper = sum(c for c in selected_plan.values() if c > 0)
         progress_bar = st.progress(0.0) if total_upper > 0 else None
@@ -1417,28 +1366,16 @@ def main() -> None:
         for kp, count in selected_plan.items():
             if count <= 0:
                 continue
-            
-            # 获取该知识点的所有题目
             pool = [r for r in filtered if kp in (r.get("knowledge_points") or [])]
             if not pool:
                 continue
-            
-            # 仅保留有「去手写」或附件的题目
-            pool_with_time = [
-                (r, r.get("created_time", 0))
-                for r in pool
-                if r.get("handwriting_text") or r.get("attachments")
-            ]
-            
+            pool_with_time = [(r, r.get("created_time", 0)) for r in pool if r.get("handwriting_text") or r.get("attachments")]
             if not pool_with_time:
                 continue
-            
-            # 按创建时间降序排序（最近的在前面），取前 X 道（X=用户选择的数量）作为参考题
             pool_with_time.sort(key=lambda x: x[1], reverse=True)
             X = min(count, len(pool_with_time))
             reference_questions = [pool_with_time[i][0] for i in range(X)]
             
-            # 对每道参考题生成 1 道类似题
             generated_questions = []
             for ref in reference_questions:
                 try:
@@ -1454,8 +1391,7 @@ def main() -> None:
                             "created_time": 0,
                         })
                 except Exception as e:
-                    st.error(f"知识点 {kp} 生成类似题目失败：{str(e)}")
-                    # 该参考题失败后继续处理下一道，不中断整个知识点
+                    st.error(f"生成失败：{str(e)}")
                 current += 1
                 if progress_bar:
                     progress_bar.progress(min(1.0, current / total_upper))
@@ -1467,292 +1403,140 @@ def main() -> None:
             progress_bar.progress(1.0)
         return similar_selections
     
-    # 使用两列布局放置按钮
-    col1, col2 = st.columns(2)
+    st.markdown("---")
+    st.markdown("### 生成原题试卷")
     
+    col1, col2 = st.columns(2)
     with col1:
-        if st.button("生成题库WORD文档", type="primary", disabled=not has_valid_selection, use_container_width=True):
-            with st.spinner("正在生成题库WORD文档，请稍候..."):
-                try:
-                    selections = prepare_selections()
-
-                    if not selections or sum(len(v) for v in selections.values()) == 0:
-                        st.warning("当前选择下没有可用题目。")
-                        return
-
-                    doc_bytes = build_doc(selected_subjects, selections, token)
-                    filename = f"{'、'.join(selected_subjects)}_错题专项训练.docx"
-                    st.success("✓ 题库WORD文档已生成，可以下载。")
-                    st.download_button(
-                        "📥 下载 Word 文档",
-                        data=doc_bytes,
-                        file_name=filename,
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        use_container_width=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"生成题库WORD文档时出错：{exc}")
-                    st.exception(exc)
+        if st.button("生成 Word 文档", type="primary", use_container_width=True, key="exam_word"):
+            try:
+                progress_bar = st.progress(0, text="正在准备题目...")
+                selections = prepare_selections()
+                if not selections:
+                    st.warning("没有可用题目")
+                    return
+                progress_bar.progress(30, text="正在生成文档...")
+                doc_bytes = build_doc(selected_subjects, selections, token)
+                progress_bar.progress(100, text="生成完成！")
+                filename = f"{'、'.join(selected_subjects)}_原题试卷.docx"
+                st.success("✓ 生成成功")
+                st.download_button("📥 下载 Word", data=doc_bytes, file_name=filename, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
+            except Exception as e:
+                st.error(f"生成失败：{e}")
     
     with col2:
-        if st.button("生成题库HTML", type="primary", disabled=not has_valid_selection, use_container_width=True):
-            with st.spinner("正在生成题库HTML，请稍候..."):
-                try:
-                    selections = prepare_selections()
-
-                    if not selections or sum(len(v) for v in selections.values()) == 0:
-                        st.warning("当前选择下没有可用题目。")
-                        return
-
-                    html_content = build_html(selected_subjects, selections, token)
-                    filename = f"{'、'.join(selected_subjects)}_错题专项训练.html"
-                    st.success("✓ 题库HTML已生成，可以下载。")
-                    st.download_button(
-                        "📥 下载 HTML 文档",
-                        data=html_content.encode('utf-8'),
-                        file_name=filename,
-                        mime="text/html",
-                        use_container_width=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"生成题库HTML时出错：{exc}")
-                    st.exception(exc)
+        if st.button("生成 HTML 文档", type="primary", use_container_width=True, key="exam_html"):
+            try:
+                progress_bar = st.progress(0, text="正在准备题目...")
+                selections = prepare_selections()
+                if not selections:
+                    st.warning("没有可用题目")
+                    return
+                progress_bar.progress(30, text="正在生成文档...")
+                html_content = build_html(selected_subjects, selections, token)
+                progress_bar.progress(100, text="生成完成！")
+                filename = f"{'、'.join(selected_subjects)}_原题试卷.html"
+                st.success("✓ 生成成功")
+                st.download_button("📥 下载 HTML", data=html_content.encode('utf-8'), file_name=filename, mime="text/html", use_container_width=True)
+            except Exception as e:
+                st.error(f"生成失败：{e}")
     
-    # 添加类似题目按钮（使用新的两列布局）
-    st.markdown("---")  # 分隔线
-    st.markdown("### 生成类似题目")
-    if not llm_api_key:
-        st.warning("⚠️ 生成类似题目功能需要配置智谱AI API密钥，请在上方配置区域输入。")
-    col3, col4 = st.columns(2)
-    
-    with col3:
-        if st.button("生成类似题目WORD文档", type="primary", disabled=not has_valid_selection or not llm_api_key, use_container_width=True):
-            if not llm_api_key:
-                st.error("请先配置大模型API密钥才能生成类似题目")
-                return
-            with st.spinner("正在使用大模型生成类似题目，请稍候..."):
-                try:
-                    similar_selections = prepare_similar_selections(llm_api_key, llm_api_base, llm_model, token)
-
-                    if not similar_selections or sum(len(v) for v in similar_selections.values()) == 0:
-                        st.warning("生成类似题目失败或没有可用题目。")
-                        return
-
-                    doc_bytes = build_doc(selected_subjects, similar_selections, token)
-                    filename = f"{'、'.join(selected_subjects)}_类似题目专项训练.docx"
-                    st.success("✓ 类似题目WORD文档已生成，可以下载。")
-                    st.download_button(
-                        "📥 下载 Word 文档",
-                        data=doc_bytes,
-                        file_name=filename,
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        use_container_width=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    error_msg = str(exc)
-                    st.error(f"生成类似题目WORD文档时出错：{error_msg}")
-                    
-                    # 检查是否是API认证相关的错误
-                    if any(keyword in error_msg.lower() for keyword in ["401", "unauthorized", "authentication", "api key", "invalid", "forbidden", "403", "令牌已过期", "验证不正确"]):
-                        st.error("""
-                        ⚠️ **API认证失败（401错误）**
-                        
-                        **可能的原因：**
-                        1. 智谱AI API Key不正确或已过期
-                        2. API Key没有足够的权限
-                        3. API Key与当前使用的模型不匹配
-                        
-                        **解决方法：**
-                        1. 请前往[智谱AI开放平台](https://open.bigmodel.cn/)检查并更新API Key
-                        2. 在上方"大模型配置"区域重新输入正确的API Key
-                        3. 确认API Key有权限使用glm-4.6v或glm-4模型
-                        """)
-                    else:
-                        st.exception(exc)
-    
-    with col4:
-        if st.button("生成类似题目HTML", type="primary", disabled=not has_valid_selection or not llm_api_key, use_container_width=True):
-            if not llm_api_key:
-                st.error("请先配置大模型API密钥才能生成类似题目")
-                return
-            with st.spinner("正在使用大模型生成类似题目，请稍候..."):
-                try:
-                    similar_selections = prepare_similar_selections(llm_api_key, llm_api_base, llm_model, token)
-
-                    if not similar_selections or sum(len(v) for v in similar_selections.values()) == 0:
-                        st.warning("生成类似题目失败或没有可用题目。")
-                        return
-
-                    html_content = build_html(selected_subjects, similar_selections, token)
-                    filename = f"{'、'.join(selected_subjects)}_类似题目专项训练.html"
-                    st.success("✓ 类似题目HTML已生成，可以下载。")
-                    st.download_button(
-                        "📥 下载 HTML 文档",
-                        data=html_content.encode('utf-8'),
-                        file_name=filename,
-                        mime="text/html",
-                        use_container_width=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    error_msg = str(exc)
-                    st.error(f"生成类似题目HTML时出错：{error_msg}")
-                    
-                    # 检查是否是API认证相关的错误
-                    if any(keyword in error_msg.lower() for keyword in ["401", "unauthorized", "authentication", "api key", "invalid", "forbidden", "403", "令牌已过期", "验证不正确"]):
-                        st.error("""
-                        ⚠️ **API认证失败（401错误）**
-                        
-                        **可能的原因：**
-                        1. 智谱AI API Key不正确或已过期
-                        2. API Key没有足够的权限
-                        3. API Key与当前使用的模型不匹配
-                        
-                        **解决方法：**
-                        1. 请前往[智谱AI开放平台](https://open.bigmodel.cn/)检查并更新API Key
-                        2. 在上方"大模型配置"区域重新输入正确的API Key
-                        3. 确认API Key有权限使用glm-4.6v或glm-4模型
-                        """)
-                    else:
-                        st.exception(exc)
-
-    # ----- 错题练习 -----
     st.markdown("---")
-    st.markdown("### 错题练习")
-    practice_table_id = (
-        os.getenv("FEISHU_PRACTICE_TABLE_ID")
-        or safe_get_secret("FEISHU_PRACTICE_TABLE_ID")
-        or config.get("FEISHU_PRACTICE_TABLE_ID")
-        or ""
-    )
-    filtered_practice = (
-        filtered
-        if not selected_kp
-        else [r for r in filtered if any(kp in (r.get("knowledge_points") or []) for kp in selected_kp)]
-    )
-
-    def _go_next_practice() -> None:
-        pm = st.session_state.get("practice_map", {})
-        pf = st.session_state.get("practice_filtered", [])
-        n = pick_next_question(pf, pm, int(time.time() * 1000))
-        if n:
-            st.session_state["practice_current"] = n
-            st.session_state["practice_origin"] = None
-            st.session_state["practice_is_similar"] = False
-            st.session_state["practice_similar_count"] = 0
-        else:
-            for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count"):
-                st.session_state.pop(k, None)
-            st.success("本轮可复习的题目已练完。")
-
-    if st.session_state.get("practice_current"):
-        cur = st.session_state["practice_current"]
-        st.session_state.setdefault("practice_map", {})
-        st.session_state.setdefault("practice_filtered", [])
-        if st.session_state.get("practice_is_similar"):
-            st.caption("类似题")
-        render_question_streamlit(cur, token)
-        st.caption("掌握了吗？")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("会", key="practice_btn_yes"):
-                is_sim = st.session_state.get("practice_is_similar", False)
-                if not is_sim:
-                    save_practice_feedback(
-                        token,
-                        st.session_state["practice_table_id"],
-                        (cur.get("record_id") or "").strip(),
-                        True,
-                        st.session_state["practice_map"],
-                    )
-                _go_next_practice()
-                st.rerun()
-        with col_b:
-            if st.button("不会", key="practice_btn_no"):
-                is_sim = st.session_state.get("practice_is_similar", False)
-                orig = st.session_state.get("practice_origin")
-                ptid = st.session_state.get("practice_table_id", "")
-                pm = st.session_state.get("practice_map", {})
-                if not is_sim:
-                    save_practice_feedback(
-                        token,
-                        ptid,
-                        (cur.get("record_id") or "").strip(),
-                        False,
-                        pm,
-                    )
-                    st.session_state["practice_origin"] = cur
-                    if llm_api_key:
-                        with st.spinner("正在生成类似题目…"):
-                            try:
-                                texts = generate_similar_questions_with_llm(
-                                    cur, 1, llm_api_key, llm_api_base, llm_model, token
-                                )
-                                if texts:
-                                    st.session_state["practice_current"] = {
-                                        "handwriting_text": texts[0],
-                                        "attachments": [],
-                                        "record_id": "",
-                                    }
-                                    st.session_state["practice_is_similar"] = True
-                                    st.session_state["practice_similar_count"] = 1
-                                    st.rerun()
-                                else:
-                                    _go_next_practice()
-                            except Exception as e:
-                                st.error(f"生成类似题目失败：{e}，跳过类似题进入下一道")
-                                _go_next_practice()
-                    else:
-                        st.warning("未配置智谱AI API Key，无法生成类似题，直接进入下一道")
-                        _go_next_practice()
-                else:
-                    cnt = st.session_state.get("practice_similar_count", 0)
-                    if cnt < 2 and llm_api_key and orig:
-                        with st.spinner("再出一道类似题目…"):
-                            try:
-                                texts = generate_similar_questions_with_llm(
-                                    orig, 1, llm_api_key, llm_api_base, llm_model, token
-                                )
-                                if texts:
-                                    st.session_state["practice_current"] = {
-                                        "handwriting_text": texts[0],
-                                        "attachments": [],
-                                        "record_id": "",
-                                    }
-                                    st.session_state["practice_similar_count"] = 2
-                                    st.rerun()
-                                else:
-                                    _go_next_practice()
-                            except Exception:
-                                _go_next_practice()
-                    else:
-                        _go_next_practice()
-                st.rerun()
+    st.markdown("### 生成类似题试卷")
+    
+    if not llm_api_key:
+        st.warning("⚠️ 需要配置智谱AI API Key 才能生成类似题目")
     else:
-        if not practice_table_id:
-            st.error(
-                "错题练习需要配置 **FEISHU_PRACTICE_TABLE_ID**（练习记录表的 table_id）。"
-                "请在环境变量、Secrets 或 `.feishu_config.json` 中配置。"
-                "需在同一多维表格下新建一张表，包含字段：错题record_id、上次练习时间、掌握程度、练习次数、下次练习时间。"
-            )
+        col3, col4 = st.columns(2)
+        with col3:
+            if st.button("生成类似题 Word", type="primary", use_container_width=True, key="exam_similar_word"):
+                try:
+                    st.info("正在使用 AI 生成类似题目，请稍候...")
+                    similar_selections = prepare_similar_selections()
+                    if not similar_selections:
+                        st.warning("生成失败或没有可用题目")
+                        return
+                    doc_bytes = build_doc(selected_subjects, similar_selections, token)
+                    filename = f"{'、'.join(selected_subjects)}_类似题试卷.docx"
+                    st.success("✓ 生成成功")
+                    st.download_button("📥 下载 Word", data=doc_bytes, file_name=filename, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True, key="dl_similar_word")
+                except Exception as e:
+                    st.error(f"生成失败：{e}")
+        
+        with col4:
+            if st.button("生成类似题 HTML", type="primary", use_container_width=True, key="exam_similar_html"):
+                try:
+                    st.info("正在使用 AI 生成类似题目，请稍候...")
+                    similar_selections = prepare_similar_selections()
+                    if not similar_selections:
+                        st.warning("生成失败或没有可用题目")
+                        return
+                    html_content = build_html(selected_subjects, similar_selections, token)
+                    filename = f"{'、'.join(selected_subjects)}_类似题试卷.html"
+                    st.success("✓ 生成成功")
+                    st.download_button("📥 下载 HTML", data=html_content.encode('utf-8'), file_name=filename, mime="text/html", use_container_width=True, key="dl_similar_html")
+                except Exception as e:
+                    st.error(f"生成失败：{e}")
+
+
+def main() -> None:
+    st.set_page_config(page_title="错题本", page_icon="📚", layout="wide")
+    
+    # 初始化页面状态
+    if "current_page" not in st.session_state:
+        st.session_state["current_page"] = "home"
+    
+    # 加载配置
+    app_id, app_secret, llm_api_key, llm_api_base, llm_model, config, is_streamlit_cloud = _load_app_config()
+    
+    # 检查凭据
+    app_id, app_secret = _check_feishu_credentials(app_id, app_secret, is_streamlit_cloud)
+    
+    # 主页不需要加载数据
+    if st.session_state["current_page"] == "home":
+        _render_home_page()
+        return
+    
+    # 其他页面需要加载数据
+    try:
+        token = get_tenant_access_token(app_id, app_secret)
+        raw_records = fetch_records(token)
+        records = parse_records(raw_records)
+    except requests.exceptions.ConnectionError as exc:
+        st.error(f"网络连接失败：{exc}")
+        if st.button("返回主页"):
+            st.session_state["current_page"] = "home"
+            st.rerun()
+        return
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "99991663" in msg:
+            st.error("飞书访问令牌无效，请检查应用权限配置")
         else:
-            if st.button("开始练习", key="practice_start"):
-                with st.spinner("正在加载练习记录…"):
-                    try:
-                        pm = fetch_practice_records(token, practice_table_id)
-                        n = pick_next_question(filtered_practice, pm, int(time.time() * 1000))
-                        if not n:
-                            st.info("暂无需要复习的题目，或在本筛选条件下可复习的题目已练完。")
-                        else:
-                            st.session_state["practice_current"] = n
-                            st.session_state["practice_map"] = pm
-                            st.session_state["practice_table_id"] = practice_table_id
-                            st.session_state["practice_filtered"] = filtered_practice
-                            st.session_state["practice_origin"] = None
-                            st.session_state["practice_is_similar"] = False
-                            st.session_state["practice_similar_count"] = 0
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"加载练习记录失败：{e}")
+            st.error(f"加载数据失败：{exc}")
+        if st.button("返回主页"):
+            st.session_state["current_page"] = "home"
+            st.rerun()
+        return
+    except Exception as exc:
+        st.error(f"加载数据失败：{exc}")
+        if st.button("返回主页"):
+            st.session_state["current_page"] = "home"
+            st.rerun()
+        return
+    
+    if not records:
+        st.warning("表格暂无记录，请先在飞书多维表格填充数据。")
+        if st.button("返回主页"):
+            st.session_state["current_page"] = "home"
+            st.rerun()
+        return
+    
+    # 根据当前页面渲染内容
+    if st.session_state["current_page"] == "practice":
+        _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, config)
+    elif st.session_state["current_page"] == "exam":
+        _render_exam_page(token, records, llm_api_key, llm_api_base, llm_model)
 
 
 if __name__ == "__main__":
