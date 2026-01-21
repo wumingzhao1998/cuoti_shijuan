@@ -5,6 +5,7 @@ import json
 import os
 import random
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -874,60 +875,21 @@ def generate_similar_questions_with_llm(reference_question: Dict, count: int, ap
         content_list = []
         image_added = False
         
-        # 添加图片
+        # 添加图片（使用缓存）
         for img_att in image_attachments[:1]:  # 只使用第一张图片
             img_url = img_att.get("url")
             if img_url and token:
-                try:
-                    # 下载图片并转换为base64
-                    img_headers = {"Authorization": f"Bearer {token}"}
-                    img_resp = requests.get(img_url, headers=img_headers, timeout=15, allow_redirects=True)
-                    
-                    if img_resp.ok:
-                        # 检查是否是JSON响应（飞书的临时URL）
-                        content_type = img_resp.headers.get("Content-Type", "").lower()
-                        image_data = None
-                        
-                        if "application/json" in content_type:
-                            try:
-                                json_data = img_resp.json()
-                                if isinstance(json_data, dict) and json_data.get("code") == 0:
-                                    data = json_data.get("data", {})
-                                    tmp_urls = data.get("tmp_download_urls", [])
-                                    if tmp_urls and isinstance(tmp_urls, list) and len(tmp_urls) > 0:
-                                        real_url = tmp_urls[0].get("tmp_download_url") if isinstance(tmp_urls[0], dict) else None
-                                    else:
-                                        real_url = data.get("tmp_download_url") or data.get("download_url")
-                                    
-                                    if real_url:
-                                        img_resp2 = requests.get(real_url, headers=img_headers, timeout=15, allow_redirects=True)
-                                        if img_resp2.ok:
-                                            image_data = img_resp2.content
-                            except Exception as e:
-                                # 如果JSON解析失败，尝试直接使用响应内容
-                                pass
-                        
-                        if not image_data:
-                            image_data = img_resp.content
-                        
-                        if image_data and len(image_data) > 0:
-                            # 转换为base64
-                            img_base64 = base64.b64encode(image_data).decode('utf-8')
-                            img_mime = img_att.get("mime") or content_type or "image/png"
-                            # 确保MIME类型正确
-                            if not img_mime or img_mime == "application/json":
-                                img_mime = "image/png"
-                            
-                            content_list.append({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{img_mime};base64,{img_base64}"
-                                }
-                            })
-                            image_added = True
-                except Exception as e:
-                    # 图片下载失败，记录错误但继续
-                    pass
+                # 使用缓存获取图片
+                cached = _get_cached_image_base64(img_url, token)
+                if cached:
+                    img_base64, img_mime = cached
+                    content_list.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{img_mime};base64,{img_base64}"
+                        }
+                    })
+                    image_added = True
         
         # 添加文本提示
         content_list.append({
@@ -1133,21 +1095,187 @@ def _render_home_page():
         if st.button("生成试卷", type="primary", use_container_width=True, key="home_exam_btn"):
             st.session_state["current_page"] = "exam"
             st.rerun()
+
+
+# ==================== 练习优化相关函数 ====================
+
+def _get_today_str() -> str:
+    """获取今天的日期字符串"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _init_daily_practice_tracking():
+    """初始化每日练习追踪，每天重置"""
+    today = _get_today_str()
+    if st.session_state.get("practice_date") != today:
+        st.session_state["practiced_today"] = set()
+        st.session_state["practice_date"] = today
+        st.session_state["similar_cache"] = {}  # 每天也清空缓存
+        st.session_state["pregenerate_queue"] = []
+        st.session_state["pregenerate_done"] = set()
+
+
+def _mark_practiced_today(record_id: str):
+    """标记某题今日已练过"""
+    if not record_id:
+        return
+    _init_daily_practice_tracking()
+    practiced = st.session_state.get("practiced_today", set())
+    practiced.add(record_id)
+    st.session_state["practiced_today"] = practiced
+
+
+def _is_practiced_today(record_id: str) -> bool:
+    """检查某题今日是否已练过"""
+    if not record_id:
+        return False
+    _init_daily_practice_tracking()
+    return record_id in st.session_state.get("practiced_today", set())
+
+
+def _filter_not_practiced_today(questions: List[Dict]) -> List[Dict]:
+    """过滤掉今日已练过的题目"""
+    _init_daily_practice_tracking()
+    practiced = st.session_state.get("practiced_today", set())
+    return [q for q in questions if (q.get("record_id") or "").strip() not in practiced]
+
+
+def _get_similar_from_cache(record_id: str) -> Optional[str]:
+    """从缓存获取类似题"""
+    if not record_id:
+        return None
+    cache = st.session_state.get("similar_cache", {})
+    if record_id in cache and cache[record_id]:
+        # 取出一道（不删除，因为可能需要第二道）
+        return cache[record_id][0] if cache[record_id] else None
+    return None
+
+
+def _get_second_similar_from_cache(record_id: str) -> Optional[str]:
+    """从缓存获取第二道类似题"""
+    if not record_id:
+        return None
+    cache = st.session_state.get("similar_cache", {})
+    if record_id in cache and len(cache[record_id]) >= 2:
+        return cache[record_id][1]
+    return None
+
+
+def _add_to_similar_cache(record_id: str, similar_texts: List[str]):
+    """添加类似题到缓存"""
+    if not record_id or not similar_texts:
+        return
+    if "similar_cache" not in st.session_state:
+        st.session_state["similar_cache"] = {}
+    st.session_state["similar_cache"][record_id] = similar_texts
+
+
+def _get_cached_image_base64(img_url: str, token: str) -> Optional[tuple]:
+    """
+    获取图片的base64编码，优先从缓存读取
+    返回 (base64_data, mime_type) 或 None
+    """
+    if not img_url:
+        return None
     
+    # 检查缓存
+    if "image_cache" not in st.session_state:
+        st.session_state["image_cache"] = {}
+    
+    cache = st.session_state["image_cache"]
+    if img_url in cache:
+        return cache[img_url]
+    
+    # 缓存未命中，下载图片
+    try:
+        img_headers = {"Authorization": f"Bearer {token}"}
+        img_resp = requests.get(img_url, headers=img_headers, timeout=15, allow_redirects=True)
+        
+        if img_resp.ok:
+            content_type = img_resp.headers.get("Content-Type", "").lower()
+            image_data = None
+            
+            if "application/json" in content_type:
+                try:
+                    json_data = img_resp.json()
+                    if isinstance(json_data, dict) and json_data.get("code") == 0:
+                        data = json_data.get("data", {})
+                        tmp_urls = data.get("tmp_download_urls", [])
+                        if tmp_urls and isinstance(tmp_urls, list) and len(tmp_urls) > 0:
+                            real_url = tmp_urls[0].get("tmp_download_url") if isinstance(tmp_urls[0], dict) else None
+                        else:
+                            real_url = data.get("tmp_download_url") or data.get("download_url")
+                        
+                        if real_url:
+                            img_resp2 = requests.get(real_url, headers=img_headers, timeout=15, allow_redirects=True)
+                            if img_resp2.ok:
+                                image_data = img_resp2.content
+                                content_type = img_resp2.headers.get("Content-Type", "image/png").lower()
+                except Exception:
+                    pass
+            
+            if not image_data:
+                image_data = img_resp.content
+            
+            if image_data and len(image_data) > 0:
+                img_base64 = base64.b64encode(image_data).decode('utf-8')
+                img_mime = content_type if content_type and "image" in content_type else "image/png"
+                result = (img_base64, img_mime)
+                cache[img_url] = result
+                return result
+    except Exception:
+        pass
+    
+    return None
+
+
+def _pregenerate_one_similar(question: Dict, llm_api_key: str, llm_api_base: str, llm_model: str, token: str) -> bool:
+    """为一道题预生成类似题，返回是否成功"""
+    record_id = (question.get("record_id") or "").strip()
+    if not record_id:
+        return False
+    
+    # 已经生成过则跳过
+    done = st.session_state.get("pregenerate_done", set())
+    if record_id in done:
+        return True
+    
+    try:
+        # 生成2道类似题（第一次不会和第二次不会各用一道）
+        texts = generate_similar_questions_with_llm(question, 2, llm_api_key, llm_api_base, llm_model, token)
+        if texts:
+            _add_to_similar_cache(record_id, texts)
+            done.add(record_id)
+            st.session_state["pregenerate_done"] = done
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _get_pregenerate_progress() -> tuple:
+    """获取预生成进度 (已完成, 总数)"""
+    done = len(st.session_state.get("pregenerate_done", set()))
+    queue = st.session_state.get("pregenerate_queue", [])
+    total = len(queue)
+    return (done, total)
 
 
 def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, config):
     """渲染错题练习页面"""
+    # 初始化每日练习追踪
+    _init_daily_practice_tracking()
+    
     # 返回按钮
     if st.button("← 返回主页", key="practice_back"):
         # 清理练习状态
-        for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count", "practice_map", "practice_filtered", "practice_table_id"):
+        for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count", "practice_map", "practice_filtered", "practice_table_id", "pregenerate_queue", "pregenerate_done"):
             st.session_state.pop(k, None)
         st.session_state["current_page"] = "home"
         st.rerun()
     
     st.title("📝 错题练习")
-    st.caption("根据艾宾浩斯遗忘曲线智能安排复习")
+    st.caption("根据艾宾浩斯遗忘曲线智能安排复习（错题原题每天只出现一次）")
     
     practice_table_id = (
         os.getenv("FEISHU_PRACTICE_TABLE_ID")
@@ -1177,10 +1305,30 @@ def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, 
     
     st.markdown("---")
     
+    # 显示预生成进度
+    done_count, total_count = _get_pregenerate_progress()
+    if total_count > 0:
+        if done_count < total_count:
+            st.caption(f"⏳ 正在准备类似题... ({done_count}/{total_count})")
+        else:
+            st.caption(f"✓ 类似题已就绪 ({done_count}/{total_count})")
+    
     def _go_next_practice() -> None:
+        """进入下一道题，并标记当前题已练过"""
+        # 标记当前题今日已练
+        cur = st.session_state.get("practice_current")
+        if cur and not st.session_state.get("practice_is_similar"):
+            rid = (cur.get("record_id") or "").strip()
+            if rid:
+                _mark_practiced_today(rid)
+        
         pm = st.session_state.get("practice_map", {})
         pf = st.session_state.get("practice_filtered", [])
-        n = pick_next_question(pf, pm, int(time.time() * 1000))
+        
+        # 过滤掉今日已练过的题目
+        pf_available = _filter_not_practiced_today(pf)
+        
+        n = pick_next_question(pf_available, pm, int(time.time() * 1000))
         if n:
             st.session_state["practice_current"] = n
             st.session_state["practice_origin"] = None
@@ -1229,13 +1377,25 @@ def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, 
                 pm = st.session_state.get("practice_map", {})
                 
                 if not is_sim:
-                    save_practice_feedback(token, ptid, (cur.get("record_id") or "").strip(), False, pm)
+                    # 第一次点击"不会"
+                    rid = (cur.get("record_id") or "").strip()
+                    save_practice_feedback(token, ptid, rid, False, pm)
                     st.session_state["practice_origin"] = cur
-                    if llm_api_key:
+                    
+                    # 优先从缓存获取类似题
+                    cached_similar = _get_similar_from_cache(rid)
+                    if cached_similar:
+                        st.session_state["practice_current"] = {"handwriting_text": cached_similar, "attachments": [], "record_id": ""}
+                        st.session_state["practice_is_similar"] = True
+                        st.session_state["practice_similar_count"] = 1
+                        st.rerun()
+                    elif llm_api_key:
+                        # 缓存未命中，实时生成
                         with st.spinner("正在生成类似题目…"):
                             try:
-                                texts = generate_similar_questions_with_llm(cur, 1, llm_api_key, llm_api_base, llm_model, token)
+                                texts = generate_similar_questions_with_llm(cur, 2, llm_api_key, llm_api_base, llm_model, token)
                                 if texts:
+                                    _add_to_similar_cache(rid, texts)
                                     st.session_state["practice_current"] = {"handwriting_text": texts[0], "attachments": [], "record_id": ""}
                                     st.session_state["practice_is_similar"] = True
                                     st.session_state["practice_similar_count"] = 1
@@ -1248,17 +1408,26 @@ def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, 
                     else:
                         _go_next_practice()
                 else:
+                    # 第二次点击"不会"（在类似题上）
                     cnt = st.session_state.get("practice_similar_count", 0)
-                    if cnt < 2 and llm_api_key and orig:
-                        with st.spinner("再出一道类似题目…"):
-                            try:
-                                texts = generate_similar_questions_with_llm(orig, 1, llm_api_key, llm_api_base, llm_model, token)
-                                if texts:
-                                    st.session_state["practice_current"] = {"handwriting_text": texts[0], "attachments": [], "record_id": ""}
-                                    st.session_state["practice_similar_count"] = 2
-                                    st.rerun()
-                                else:
-                                    _go_next_practice()
+                    if cnt < 2 and orig:
+                        orig_rid = (orig.get("record_id") or "").strip()
+                        # 优先从缓存获取第二道类似题
+                        cached_second = _get_second_similar_from_cache(orig_rid)
+                        if cached_second:
+                            st.session_state["practice_current"] = {"handwriting_text": cached_second, "attachments": [], "record_id": ""}
+                            st.session_state["practice_similar_count"] = 2
+                            st.rerun()
+                        elif llm_api_key:
+                            with st.spinner("再出一道类似题目…"):
+                                try:
+                                    texts = generate_similar_questions_with_llm(orig, 1, llm_api_key, llm_api_base, llm_model, token)
+                                    if texts:
+                                        st.session_state["practice_current"] = {"handwriting_text": texts[0], "attachments": [], "record_id": ""}
+                                        st.session_state["practice_similar_count"] = 2
+                                        st.rerun()
+                                    else:
+                                        _go_next_practice()
                             except Exception:
                                 _go_next_practice()
                     else:
@@ -1270,10 +1439,15 @@ def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, 
             with st.spinner("正在加载练习记录…"):
                 try:
                     pm = fetch_practice_records(token, practice_table_id)
-                    n = pick_next_question(filtered_practice, pm, int(time.time() * 1000))
+                    
+                    # 过滤掉今日已练过的题目
+                    available_questions = _filter_not_practiced_today(filtered_practice)
+                    
+                    n = pick_next_question(available_questions, pm, int(time.time() * 1000))
                     if not n:
-                        st.info("暂无需要复习的题目。")
+                        st.info("暂无需要复习的题目，或今日的题目已全部练完。")
                     else:
+                        # 立即显示第一道题
                         st.session_state["practice_current"] = n
                         st.session_state["practice_map"] = pm
                         st.session_state["practice_table_id"] = practice_table_id
@@ -1281,14 +1455,33 @@ def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, 
                         st.session_state["practice_origin"] = None
                         st.session_state["practice_is_similar"] = False
                         st.session_state["practice_similar_count"] = 0
+                        
+                        # 设置预生成队列（所有可练习的题目）
+                        st.session_state["pregenerate_queue"] = available_questions
+                        st.session_state["pregenerate_done"] = set()
+                        st.session_state["pregenerate_started"] = True
+                        
                         st.rerun()
                 except Exception as e:
                     st.error(f"加载练习记录失败：{e}")
     
+    # 后台预生成逻辑：每次页面刷新时尝试生成一道
+    if st.session_state.get("pregenerate_started") and llm_api_key:
+        queue = st.session_state.get("pregenerate_queue", [])
+        done = st.session_state.get("pregenerate_done", set())
+        
+        # 找到下一个需要预生成的题目
+        for q in queue:
+            rid = (q.get("record_id") or "").strip()
+            if rid and rid not in done:
+                # 预生成这道题的类似题（不阻塞UI）
+                _pregenerate_one_similar(q, llm_api_key, llm_api_base, llm_model, token)
+                break  # 每次只生成一道，避免阻塞太久
+    
     # 底部返回按钮
     st.markdown("---")
     if st.button("← 返回主页", key="practice_back_bottom"):
-        for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count", "practice_map", "practice_filtered", "practice_table_id"):
+        for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count", "practice_map", "practice_filtered", "practice_table_id", "pregenerate_queue", "pregenerate_done", "pregenerate_started"):
             st.session_state.pop(k, None)
         st.session_state["current_page"] = "home"
         st.rerun()

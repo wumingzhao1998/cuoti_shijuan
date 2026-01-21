@@ -10,7 +10,7 @@ git add -A
 
 echo.
 echo [2/4] 提交...
-git commit -m "优化界面和修复secrets读取"
+git commit -m "界面优化和性能优化"
 
 echo.
 echo [3/4] 推送到 review-q...
