@@ -1284,6 +1284,14 @@ def _render_practice_page(token, records, llm_api_key, llm_api_base, llm_model, 
                         st.rerun()
                 except Exception as e:
                     st.error(f"加载练习记录失败：{e}")
+    
+    # 底部返回按钮
+    st.markdown("---")
+    if st.button("← 返回主页", key="practice_back_bottom"):
+        for k in ("practice_current", "practice_origin", "practice_is_similar", "practice_similar_count", "practice_map", "practice_filtered", "practice_table_id"):
+            st.session_state.pop(k, None)
+        st.session_state["current_page"] = "home"
+        st.rerun()
 
 
 def _render_exam_page(token, records, llm_api_key, llm_api_base, llm_model):
@@ -1314,13 +1322,16 @@ def _render_exam_page(token, records, llm_api_key, llm_api_base, llm_model):
     selected_kp = st.multiselect("选择知识点", options=knowledge_options, default=knowledge_options, key="exam_kp")
     
     # 每个知识点的题目数量
-    st.markdown("### 题目数量")
     selected_plan: Dict[str, int] = {}
     for kp in selected_kp:
         pool = [r for r in filtered if kp in (r.get("knowledge_points") or [])]
         max_count = len(pool)
         count = st.number_input(f"{kp}（最多 {max_count} 题）", min_value=0, max_value=max_count, value=max_count, key=f"exam_count_{kp}")
         selected_plan[kp] = count
+    
+    # 显示当前选择的总题目数量
+    total_count = sum(selected_plan.values())
+    st.markdown(f"### 当前选择题目数量：{total_count} 道")
     
     has_valid_selection = any(count > 0 for count in selected_plan.values())
     
@@ -1460,6 +1471,12 @@ def _render_exam_page(token, records, llm_api_key, llm_api_base, llm_model):
                     st.download_button("📥 下载 HTML", data=html_content.encode('utf-8'), file_name=filename, mime="text/html", use_container_width=True, key="dl_similar_html")
                 except Exception as e:
                     st.error(f"生成失败：{e}")
+    
+    # 底部返回按钮
+    st.markdown("---")
+    if st.button("← 返回主页", key="exam_back_bottom"):
+        st.session_state["current_page"] = "home"
+        st.rerun()
 
 
 def main() -> None:
