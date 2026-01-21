@@ -10,7 +10,7 @@ git add -A
 
 echo.
 echo [2/4] 提交...
-git commit -m "优化界面：显示总题目数量，添加返回按钮"
+git commit -m "性能优化：预生成类似题、缓存机制、每日练习限制"
 
 echo.
 echo [3/4] 推送到 review-q...

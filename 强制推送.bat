@@ -14,7 +14,7 @@ git add -A
 
 echo.
 echo [3/6] 提交更改...
-git commit -m "优化界面：显示总题目数量，添加返回按钮" --allow-empty
+git commit -m "性能优化：预生成类似题、缓存机制、每日练习限制"
 
 echo.
 echo [4/6] 强制推送到 review-q...
