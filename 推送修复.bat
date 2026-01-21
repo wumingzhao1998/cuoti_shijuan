@@ -10,7 +10,7 @@ git add -A
 
 echo.
 echo [2/4] 提交...
-git commit -m "修复: 支持 [secrets] 嵌套格式读取配置"
+git commit -m "优化界面：显示总题目数量，添加返回按钮"
 
 echo.
 echo [3/4] 推送到 review-q...
